@@ -9,6 +9,10 @@ import requests  # type: ignore
 DOWNLOAD_RETRIES_COUNT = 3
 
 
+class DownloadException(BaseException):
+    pass
+
+
 def get_with_retries(
     url: str,
     retries: int = DOWNLOAD_RETRIES_COUNT,
@@ -31,7 +35,7 @@ def get_with_retries(
 
             exc = e
     else:
-        raise Exception(exc)
+        raise DownloadException(exc)
 
     return response
 
@@ -73,7 +77,9 @@ def download_with_progress(url: str, path: Path):
 
             path.unlink(True)
     else:
-        raise Exception(f"Cannot download dataset from {url}, all retries exceeded")
+        raise DownloadException(
+            f"Cannot download dataset from {url}, all retries exceeded"
+        )
 
     if sys.stdout.isatty():
         sys.stdout.write("\n")

@@ -10,7 +10,7 @@ CheckArch = namedtuple("CheckArch", ("check_name", "deb_arch", "rpm_arch"))
 
 
 class Package:
-    def __init__(self, check_name: Path, path: Path):
+    def __init__(self, check_name: Path, path: Path, version: str):
         self.path = path
         self.s3_suffix = check_name / path.name
 
@@ -27,7 +27,8 @@ class Package:
             return
 
         try:
-            # join doesn't remove double slash from the url_prefix
+            # join doesn't remove double slash from the url_prefix,
+            # that's why it's used instead of Path
             download_with_progress(p.join(url_prefix, self.s3_suffix), self.path)
         except Exception:
             logging.error("Failed to download package %s, removing", self.name)
@@ -58,13 +59,13 @@ class Packages:
         for check in self.checks:
             for name in self.packages:
                 deb = path / f"{name}_{version}_{check.deb_arch}.deb"
-                self.deb.append(Package(check.check_name, deb))
+                self.deb.append(Package(check.check_name, deb, version))
 
                 rpm = path / f"{name}-{version}.{check.rpm_arch}.rpm"
-                self.rpm.append(Package(check.check_name, rpm))
+                self.rpm.append(Package(check.check_name, rpm, version))
 
                 tgz = path / f"{name}-{version}-{check.deb_arch}.tgz"
-                self.tgz.append(Package(check.check_name, tgz))
+                self.tgz.append(Package(check.check_name, tgz, version))
 
     def download(self, overwrite: bool, *packages):
         if not packages:

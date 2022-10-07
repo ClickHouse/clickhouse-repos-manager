@@ -30,6 +30,13 @@ def get_releases_dir() -> Path:
     return g.releases_dir
 
 
+def get_repos_root_dir() -> Path:
+    if "repos_root_dir" not in g:
+        g.repos_root_dir = Path(current_app.config["REPOS_ROOT"])
+
+    return g.repos_root_dir
+
+
 def get_gh_client() -> GitHub:
     if "gh_client" not in g:
         g.gh_client = GitHub(current_app.config["GITHUB_TOKEN"])
