@@ -1,0 +1,15 @@
+Origin: ClickHouse
+Label: ClickHouse
+Codename: lts
+Architectures: amd64 arm64
+Components: main
+SignWith: 885E2BDCF96B0B45ABF058453E4AD4719DDE9A38
+Limit: -1
+
+Origin: ClickHouse
+Label: ClickHouse
+Codename: stable
+Architectures: amd64 arm64
+Components: main
+SignWith: 885E2BDCF96B0B45ABF058453E4AD4719DDE9A38
+Limit: -1

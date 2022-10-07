@@ -2,6 +2,12 @@ The repository to operate packages.clickhouse.com
 
 ##
 
+### `reprepro` configuration
+
+The file used in `reprepro` is in [configs/reprepro/distributions](./configs/reprepro/distributions)
+
+#### A commands list to implement
+
 ```
 python3 push_to_artifactory.py --release 'refs/tags/v22.9.1.2603-stable' --commit '3030d4c7ff09ec44ab07d0a8069ea923227288a1' --all -n
 # deb
