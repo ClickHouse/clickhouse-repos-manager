@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 from _vendor.get_robot_token import get_best_robot_token
+from args_helper import to_bool
 from context_helper import get_working_dir, get_releases_dir
 from flask import Flask, jsonify, request
 from release import Release, ReleaseException
@@ -15,6 +16,21 @@ app.config["WORKING_DIR"] = Path.home() / "clickhouse-repository-manager"
 app.config["S3_BUILDS_BUCKET"] = "clickhouse-builds"
 app.config["S3_TEST_REPORTS_BUCKET"] = "clickhouse-test-reports"
 app.config["S3_URL"] = "https://s3.amazonaws.com"
+# We have a predefined tree, so I prefer to stick to it here and define only the root
+# The only directory that must be created in advance is configs/deb
+# r2/
+# ├── configs
+# │   └── deb
+# ├── deb
+# │   ├── dists
+# │   └── pool
+# ├── rpm
+# │   ├── lts
+# │   └── stable
+# └── tgz
+#     ├── lts
+#     └── stable
+app.config["REPOS_ROOT"] = Path.home() / "r2"
 app.config.from_prefixed_env("CHRM")
 app.config["GITHUB_TOKEN"] = app.config.get("GITHUB_TOKEN", get_best_robot_token())
 
@@ -59,12 +75,23 @@ def upload_release(version_tag: str):
         release = Release(version_tag, request.args.getlist("binary"))
     except ReleaseException as e:
         return str(e), 400
+    except BaseException as e:
+        return str(e), 500
 
-    release.do(True)
-    return jsonify(
-        tag=release.tag.tag,
-        release=release.git_release.title,
-        commit=release.commit.sha,
+    sync = request.args.get("sync", default=False, type=to_bool)
+
+    try:
+        release.do(sync)
+    except Exception as e:
+        return str(e), 500
+
+    return (
+        jsonify(
+            tag=release.tag.tag,
+            release=release.git_release.title,
+            commit=release.commit.sha,
+        ),
+        202,
     )
 
 
