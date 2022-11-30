@@ -68,3 +68,10 @@ def get_s3_reports_url() -> str:
         )
 
     return g.s3_reports_url
+
+
+def get_signing_key() -> str:
+    if "signing_key" not in g:
+        g.signing_key = current_app.config["SIGNING_KEY"]
+
+    return g.signing_key

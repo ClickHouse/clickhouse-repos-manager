@@ -11,11 +11,6 @@ from release import Release, ReleaseException
 
 
 app = Flask(__name__)
-app.config["REPOSITORY"] = "ClickHouse/ClickHouse"
-app.config["WORKING_DIR"] = Path.home() / "clickhouse-repository-manager"
-app.config["S3_BUILDS_BUCKET"] = "clickhouse-builds"
-app.config["S3_TEST_REPORTS_BUCKET"] = "clickhouse-test-reports"
-app.config["S3_URL"] = "https://s3.amazonaws.com"
 # We have a predefined tree, so I prefer to stick to it here and define only the root
 # The only directory that must be created in advance is configs/deb
 # r2/
@@ -31,6 +26,14 @@ app.config["S3_URL"] = "https://s3.amazonaws.com"
 #     ├── lts
 #     └── stable
 app.config["REPOS_ROOT"] = Path.home() / "r2"
+
+app.config["REPOSITORY"] = "ClickHouse/ClickHouse"
+app.config["S3_BUILDS_BUCKET"] = "clickhouse-builds"
+app.config["S3_TEST_REPORTS_BUCKET"] = "clickhouse-test-reports"
+app.config["S3_URL"] = "https://s3.amazonaws.com"
+app.config["SIGNING_KEY"] = "3E4AD4719DDE9A38"
+app.config["WORKING_DIR"] = Path.home() / "clickhouse-repository-manager"
+
 app.config.from_prefixed_env("CHRM")
 app.config["GITHUB_TOKEN"] = app.config.get("GITHUB_TOKEN", get_best_robot_token())
 
