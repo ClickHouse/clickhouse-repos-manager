@@ -61,6 +61,7 @@ class Packages:
         self.deb = []  # type: List[Package]
         self.rpm = []  # type: List[Package]
         self.tgz = []  # type: List[Package]
+        self.tgz_sha = []  # type: List[Package]
         for check in self.checks:
             for name in self.packages:
                 deb = path / f"{name}_{version}_{check.deb_arch}.deb"
@@ -71,6 +72,8 @@ class Packages:
 
                 tgz = path / f"{name}-{version}-{check.deb_arch}.tgz"
                 self.tgz.append(Package(check.check_name, tgz, version))
+                tgz_sha = path / f"{name}-{version}-{check.deb_arch}.tgz.sha512"
+                self.tgz_sha.append(Package(check.check_name, tgz_sha, version))
 
     def download(self, overwrite: bool, *packages):
         if not packages:
@@ -86,3 +89,7 @@ class Packages:
         if "tgz" in packages:
             for package in self.tgz:
                 package.download(self.url_prefix, overwrite)
+            # Add it when the tgz.sha512 will be in all releases
+            # self.tgz.extend(self.tgz_sha)
+            # for package in self.tgz_sha:
+            #    package.download(self.url_prefix, overwrite)
