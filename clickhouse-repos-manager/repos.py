@@ -44,10 +44,7 @@ class DebRepo:
 
     def add_packages(self, version_type: str, *additional_version_types: str):
         deb_files = " ".join(pkg.path.as_posix() for pkg in self.packages)
-        command = (
-            f"reprepro --basedir '{self.reprepro_config}' --verbose --outdir "
-            f"'{self.outdir_path}' includedeb '{version_type}' {deb_files}"
-        )
+        command = f"{self.reprepro_cmd} includedeb '{version_type}' {deb_files}"
         runner(command)
         for additional_version_type in additional_version_types:
             self.process_additional_packages(version_type, additional_version_type)
@@ -59,8 +56,7 @@ class DebRepo:
             f"{pkg.path}={pkg.version}" for pkg in self.packages
         )
         command = (
-            f"reprepro --basedir '{self.reprepro_config}' --verbose --outdir "
-            f"'{self.outdir_path}' copy {additional_version_type} "
+            f"{self.reprepro_cmd} copy {additional_version_type} "
             f"{original_version_type} {packages_with_versions}"
         )
         runner(command)
@@ -81,6 +77,13 @@ class DebRepo:
     @property
     def reprepro_config(self) -> Path:
         return self._repo_root / DebRepo._reprepro_config
+
+    @property
+    def reprepro_cmd(self) -> str:
+        return (
+            f"reprepro --basedir '{self.reprepro_config}' --verbose --export=force "
+            f"--outdir '{self.outdir_path}'"
+        )
 
 
 class RpmRepo:
