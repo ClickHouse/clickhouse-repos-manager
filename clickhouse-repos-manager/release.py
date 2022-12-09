@@ -7,11 +7,11 @@ import logging
 from _vendor.ci_config import CI_CONFIG, BuildConfig
 from _vendor.download_helper import download_with_progress, DownloadException
 from _vendor.github_helper import check_tag
-from _vendor.packages import Packages
 from github.Commit import Commit
 from github.GithubException import UnknownObjectException
 from github.GitRelease import GitRelease
 from github.GitTag import GitTag
+from packages import Packages
 from repos import Repos
 
 import context_helper as ch

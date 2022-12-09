@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List
 import logging
 
-from .download_helper import download_with_progress
+from _vendor.download_helper import download_with_progress
 
 CheckArch = namedtuple("CheckArch", ("check_name", "deb_arch", "rpm_arch"))
 
