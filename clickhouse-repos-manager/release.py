@@ -22,7 +22,9 @@ class ReleaseException(BaseException):
 
 
 class Release:
-    def __init__(self, version_tag: str, additional_binaries: List[str] = None):
+    def __init__(
+        self, version_tag: str, additional_binaries: Optional[List[str]] = None
+    ):
         # The class init and static methods depend on global app context and
         # must be executed only during requests
         #
@@ -38,6 +40,7 @@ class Release:
         self.working_dir = ch.get_working_dir()
         self.release_dir = ch.get_releases_dir() / self.version_tag
         self.repos_root_dir = ch.get_repos_root_dir()
+        self.deb_config = ch.get_deb_config()
         self.gh_client = ch.get_gh_client()
         self.gh_repo = ch.get_gh_repo()
         self.update_repo_lock = ch.get_update_repo_lock()
@@ -62,6 +65,8 @@ class Release:
         self.repos = Repos(
             self.packages,
             self.repos_root_dir,
+            self.deb_config,
+            ch.get_signing_key(),
             self.version_type,
             *self.additional_version_types,
         )

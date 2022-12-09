@@ -1,18 +1,19 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
-from pathlib import Path
 from typing import Optional
 
-from _vendor.get_robot_token import get_best_robot_token
+from app_config import set_config
 from args_helper import to_bool
-from context_helper import get_working_dir, get_releases_dir
+from context_helper import get_repos_root_dir, get_releases_dir
 from flask import Flask, jsonify, request
 from release import Release, ReleaseException
+from repos import DebRepo
 
 
 app = Flask(__name__)
 # We have a predefined tree, so I prefer to stick to it here and define only the root
-# The only directory that must be created in advance is configs/deb
+# If the directory does not exist, everything will be created
+# The deb config is created from DEB_REPO_* parameters
 # r2/
 # ├── configs
 # │   └── deb
@@ -25,23 +26,17 @@ app = Flask(__name__)
 # └── tgz
 #     ├── lts
 #     └── stable
-app.config["REPOS_ROOT"] = Path.home() / "r2"
 
-app.config["REPOSITORY"] = "ClickHouse/ClickHouse"
-app.config["S3_BUILDS_BUCKET"] = "clickhouse-builds"
-app.config["S3_TEST_REPORTS_BUCKET"] = "clickhouse-test-reports"
-app.config["S3_URL"] = "https://s3.amazonaws.com"
-app.config["SIGNING_KEY"] = "3E4AD4719DDE9A38"
-app.config["WORKING_DIR"] = Path.home() / "clickhouse-repository-manager"
-
-app.config.from_prefixed_env("CHRM")
-app.config["GITHUB_TOKEN"] = app.config.get("GITHUB_TOKEN", get_best_robot_token())
+# The ENVs with "CHRM_" are processed
+set_config(app)
 
 
 @app.before_first_request
 def prepare_dirs():
-    get_working_dir().mkdir(mode=0o750, parents=True, exist_ok=True)
     get_releases_dir().mkdir(mode=0o750, parents=True, exist_ok=True)
+    get_repos_root_dir().mkdir(mode=0o750, parents=True, exist_ok=True)
+    if app.config.get("DEB_FORCE_RECONFIGURE_REPO", False):
+        (get_repos_root_dir() / DebRepo.dists_config).unlink(missing_ok=True)
 
 
 @app.route("/")
@@ -99,4 +94,6 @@ def upload_release(version_tag: str):
 
 
 if __name__ == "__main__":
+    with app.app_context():
+        prepare_dirs()
     app.run()
