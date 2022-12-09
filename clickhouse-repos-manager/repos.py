@@ -127,7 +127,13 @@ class RpmRepo:
 
 class TgzRepo:
     def __init__(self, packages: List[Package], repo_root: Path):
-        non_tgz_pkgs = [pkg for pkg in packages if not pkg.path.name.endswith(".tgz")]
+        non_tgz_pkgs = [
+            pkg
+            for pkg in packages
+            if not (
+                pkg.path.name.endswith(".tgz") or pkg.path.name.endswith(".tgz.sha512")
+            )
+        ]
         if non_tgz_pkgs:
             raise RepoException(f"all packages must end with '.tgz': {non_tgz_pkgs}")
         self.packages = packages
