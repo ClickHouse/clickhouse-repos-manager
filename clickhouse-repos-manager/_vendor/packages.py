@@ -13,6 +13,7 @@ class Package:
     def __init__(self, check_name: Path, path: Path, version: str):
         self.path = path
         self.s3_suffix = check_name / path.name
+        self._version = version
 
     @property
     def name(self) -> str:
@@ -21,6 +22,10 @@ class Package:
     @property
     def exists(self) -> bool:
         return self.path.is_file()
+
+    @property
+    def version(self) -> bool:
+        return self._version
 
     def download(self, url_prefix: str, overwrite: bool = False):
         if not overwrite and self.path.exists():
