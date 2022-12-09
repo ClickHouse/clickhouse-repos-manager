@@ -3,7 +3,7 @@ from pathlib import Path
 from shutil import copy
 from typing import List
 
-from _vendor.packages import Packages, Package
+from packages import Packages, Package
 
 
 class RepoException(BaseException):
