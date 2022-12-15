@@ -1,12 +1,14 @@
 from collections import namedtuple
 from os import path as p
 from pathlib import Path
-from typing import List
+from typing import Iterator, List
 import logging
 
-from _vendor.download_helper import download_with_progress
+from _vendor.download_helper import download
 
 CheckArch = namedtuple("CheckArch", ("check_name", "deb_arch", "rpm_arch"))
+
+logger = logging.getLogger(__name__)
 
 
 class Package:
@@ -24,20 +26,22 @@ class Package:
         return self.path.is_file()
 
     @property
-    def version(self) -> bool:
+    def version(self) -> str:
         return self._version
 
-    def download(self, url_prefix: str, overwrite: bool = False):
+    def download(self, url_prefix: str, overwrite: bool = False, logger=logger):
         if not overwrite and self.path.exists():
+            logger.info("File %s already exists, skipping", self.path)
             return
 
         try:
             # join doesn't remove double slash from the url_prefix,
             # that's why it's used instead of Path
-            download_with_progress(p.join(url_prefix, self.s3_suffix), self.path)
-        except Exception:
-            logging.error("Failed to download package %s, removing", self.name)
+            download(p.join(url_prefix, self.s3_suffix), self.path, logger=logger)
+        except Exception as e:
+            logger.error("Failed to download package %s, removing", self.name)
             self.path.unlink(True)
+            logger.error("Exception: %s", e.with_traceback)
             raise
 
 
@@ -75,21 +79,35 @@ class Packages:
                 tgz_sha = path / f"{name}-{version}-{check.deb_arch}.tgz.sha512"
                 self.tgz_sha.append(Package(check.check_name, tgz_sha, version))
 
-    def download(self, overwrite: bool, *packages):
+    def download(self, overwrite: bool, *packages, logger=logger):
         if not packages:
             packages = ("deb", "rpm", "tgz")
 
+        def log_download(pkg_type: str, pkgs: List[Package]) -> None:
+            logger.info(
+                "Downloading %s packages:\n  %s",
+                pkg_type,
+                "\n  ".join(p.path.name for p in pkgs),
+            )
+
         # Boilerplating to have a proper type hinting
         if "deb" in packages:
+            log_download("deb", self.deb)
             for package in self.deb:
-                package.download(self.url_prefix, overwrite)
+                package.download(self.url_prefix, overwrite, logger)
         if "rpm" in packages:
+            log_download("rpm", self.rpm)
             for package in self.rpm:
-                package.download(self.url_prefix, overwrite)
+                package.download(self.url_prefix, overwrite, logger)
         if "tgz" in packages:
+            log_download("tgz", self.tgz)
             for package in self.tgz:
-                package.download(self.url_prefix, overwrite)
-            # Add it when the tgz.sha512 will be in all releases
-            # self.tgz.extend(self.tgz_sha)
-            # for package in self.tgz_sha:
-            #    package.download(self.url_prefix, overwrite)
+                package.download(self.url_prefix, overwrite, logger)
+            log_download("tgz_sha", self.tgz_sha)
+            for package in self.tgz_sha:
+                package.download(self.url_prefix, overwrite, logger)
+
+    def all(self) -> Iterator[Package]:
+        for packages in (self.deb, self.rpm, self.tgz, self.tgz_sha):
+            for package in packages:
+                yield package

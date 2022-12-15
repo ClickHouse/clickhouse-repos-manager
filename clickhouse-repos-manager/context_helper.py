@@ -2,20 +2,23 @@
 from os import path as p
 from pathlib import Path
 from threading import Lock
-from typing import Dict, List, Union
+from typing import Dict, List, Union, TYPE_CHECKING
 
-from _vendor.github_helper import GitHub, Repository
+import boto3
 from flask import current_app, g
 
+from _vendor.github_helper import GitHub, Repository
+
+if TYPE_CHECKING:
+    from mypy_boto3_s3 import S3Client
+else:
+    S3Client = object
+
+
 DebParam = Union[str, List[str]]
-DEB_REPO_TEMPLATE = r"""{% for Codename in conf["Codenames"] -%}
-Codename: {{ Codename }}
-{% for name, value in conf.items() -%}
-{% if name != "Codenames" -%}
-{{name}}: {{value}}
-{% endif -%}
-{%- endfor %}
-{% endfor -%}"""
+
+# a global repository lock
+repo_lock = Lock()
 
 # TODO: tests
 def remove_prefix(s: str, prefix: str) -> str:
@@ -40,9 +43,7 @@ def get_deb_config() -> Dict[str, DebParam]:
             for key, value in current_app.config.items()
             if key.startswith(prefix)
         }
-        g.deb_config["SignWith"] = g.deb_config.get(
-            "SignWith", current_app.config.get("SIGNING_KEY")
-        )
+        g.deb_config["SignWith"] = g.deb_config.get("SignWith", get_signing_key())
 
     return g.deb_config
 
@@ -91,6 +92,22 @@ def get_s3_builds_url() -> str:
 
 
 # TODO: tests
+def get_s3_client() -> S3Client:
+    if "s3_client" not in g:
+        g.s3_client = boto3.client("s3")
+
+    return g.s3_client
+
+
+# TODO: tests
+def get_s3_reports_bucket() -> str:
+    if "s3_reports_bucket" not in g:
+        g.s3_reports_bucket = current_app.config["S3_TEST_REPORTS_BUCKET"]
+
+    return g.s3_reports_bucket
+
+
+# TODO: tests
 def get_s3_reports_url() -> str:
     if "s3_reports_url" not in g:
         g.s3_reports_url = p.join(
@@ -113,7 +130,7 @@ def get_update_repo_lock() -> Lock:
     # We must update only one repository at once due indexing
     # and R2 limitations
     if "update_repo_lock" not in g:
-        g.update_repo_lock = Lock()
+        g.update_repo_lock = repo_lock
 
     return g.update_repo_lock
 
@@ -124,3 +141,20 @@ def get_working_dir() -> Path:
         g.working_dir = Path(current_app.config["WORKING_DIR"])
 
     return g.working_dir
+
+
+class ContextHelper:
+    def __init__(self):
+        """The class to preserve all contexts for the thread exetucing"""
+        self.working_dir = get_working_dir()
+        self.releases_dir = get_releases_dir()
+        self.repos_root_dir = get_repos_root_dir()
+        self.deb_config = get_deb_config()
+        self.gh_client = get_gh_client()
+        self.gh_repo = get_gh_repo()
+        self.update_repo_lock = get_update_repo_lock()
+        # Set the S3 artifacts download url and test reports upload bucket
+        self.s3_builds_url = get_s3_builds_url()
+        self.s3_client = get_s3_client()
+        self.s3_test_reports_bucket = get_s3_reports_bucket()
+        self.signing_key = get_signing_key()

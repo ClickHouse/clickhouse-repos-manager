@@ -1,20 +1,26 @@
 #!/usr/bin/env python
 from os import path as p
+from pathlib import Path
+from queue import Queue
 from threading import Thread
 from typing import List, Optional
 import logging
 
-from _vendor.ci_config import CI_CONFIG, BuildConfig
-from _vendor.download_helper import download_with_progress, DownloadException
-from _vendor.github_helper import check_tag
 from github.Commit import Commit
-from github.GithubException import UnknownObjectException
+from github.GithubException import GithubException, UnknownObjectException
 from github.GitRelease import GitRelease
+from github.GitReleaseAsset import GitReleaseAsset
 from github.GitTag import GitTag
+
+from _vendor.ci_config import CI_CONFIG, BuildConfig
+from _vendor.download_helper import download, DownloadException
+from _vendor.github_helper import check_tag
 from packages import Packages
 from repos import Repos
+from context_helper import ContextHelper, get_releases_dir
 
-import context_helper as ch
+
+logger = logging.getLogger(__name__)
 
 
 class ReleaseException(BaseException):
@@ -22,40 +28,44 @@ class ReleaseException(BaseException):
 
 
 class Release:
+    LOG_NAME = "publish-release.txt"
+
     def __init__(
-        self, version_tag: str, additional_binaries: Optional[List[str]] = None
+        self,
+        version_tag: str,
+        context_helper: ContextHelper,
+        logger: logging.Logger,
+        additional_binaries: Optional[List[str]] = None,
     ):
         # The class init and static methods depend on global app context and
         # must be executed only during requests
         #
         # *do* can be executed in background
         self.version_tag = version_tag
+        self.logger = logger
+        self._log_file = self.log_file(version_tag)
         self._verify_version()
         self.version, self.version_type = version_tag[1:].split("-", 1)
         version_parts = self.version.split(".")
         self.release_branch = ".".join(version_parts[0:2])
         self.additional_binaries = additional_binaries or []  # type: List[str]
+        self.exceptions = Queue()  # type: Queue[ReleaseException]
+        self.ch = context_helper
 
-        # Preserve variables from the app global context
-        self.working_dir = ch.get_working_dir()
-        self.release_dir = ch.get_releases_dir() / self.version_tag
-        self.repos_root_dir = ch.get_repos_root_dir()
-        self.deb_config = ch.get_deb_config()
-        self.gh_client = ch.get_gh_client()
-        self.gh_repo = ch.get_gh_repo()
-        self.update_repo_lock = ch.get_update_repo_lock()
-        # Set the S3 artifacts download url and test reports upload bucket
-        self.s3_builds_url = ch.get_s3_builds_url()
-        self.s3_test_reports_bucket = ch.current_app.config["S3_TEST_REPORTS_BUCKET"]
-
+        self.release_dir = self.ch.releases_dir / self.version_tag
         self._tag = None  # type: Optional[GitTag]
         self._commit = None  # type: Optional[Commit]
-        self._git_release = None  # type: Optional[GitRelease]
-        self._set_github_objects()
+        self._assets = []  # type: List[GitReleaseAsset]
+        self.logger.info(
+            "The release is created for tag %s and commit %s", self.tag, self.commit
+        )
+
+        self._gh_release = None  # type: Optional[GitRelease]
+        _ = self.gh_release  # check if release is created
 
         # The prefix for the commit's builds
         self.builds_prefix = p.join(
-            self.s3_builds_url, self.release_branch, self.commit.sha
+            self.ch.s3_builds_url, self.release_branch, self.commit.sha
         )
 
         # Create release directory here, after the release is checked
@@ -64,14 +74,14 @@ class Release:
         self._packages = None  # type: Optional[Packages]
         self.repos = Repos(
             self.packages,
-            self.repos_root_dir,
-            self.deb_config,
-            ch.get_signing_key(),
+            self.ch.repos_root_dir,
+            self.ch.deb_config,
+            self.ch.signing_key,
             self.version_type,
             *self.additional_version_types,
         )
 
-    def do(self, synchronous: bool):
+    def do(self, synchronous: bool) -> Optional[Thread]:
         """A function to take care of all release steps:
         - Download packages
         - Download additional OS/arch specific binaries
@@ -86,9 +96,10 @@ class Release:
         """
         if synchronous:
             self._background_do()
-            return
+            return None
         thread = Thread(target=self._background_do, name=self.version_tag)
         thread.start()
+        return thread
 
     def _verify_version(self):
         try:
@@ -99,31 +110,39 @@ class Release:
                 "v11.2.3.44-{lts,prestable,stable,testing}",
             ) from exc
 
-    def _set_github_objects(self):
-        """Sets tag, commit and git_release values. Raises ReleaseException if
-        any necessary object is not found"""
-        _ = self.tag
-        _ = self.commit
-        _ = self.git_release
-
     def _background_do(self):
-        self.packages.download(False)
         try:
-            self.download_binaries()
-        except DownloadException:
-            # We still don't have built binaries for some older releases,
-            # so it's fine to ignore errors here
-            logging.warning(
-                "Can't download additional binaries: %s",
-                ", ".join(self.additional_binaries),
-            )
+            self.packages.download(False, logger=self.logger)
 
-        with self.update_repo_lock:
-            self.repos.add_packages()
+            # FIXME: think about checking if the SAME release is launched twice
 
-        print(f"The background task for {self.version_tag} is done")
+            if self.ch.update_repo_lock.locked():
+                self.logger.info(
+                    "The repositories are already updating by another process, waiting"
+                )
+            with self.ch.update_repo_lock:
+                self.repos.add_packages()
 
-    def download_binaries(self):
+            for package in self.packages.all():
+                self.logger.info(
+                    "Uploading %s to the release assets", package.path.name
+                )
+                self.upload_asset(package.path)
+
+            self.process_additional_binaries()
+
+        except Exception as e:
+            exc = ReleaseException(
+                f"exception occured during release {self.version_tag}"
+            ).with_traceback(e.__traceback__)
+            self.logger.exception(exc)
+            self.exceptions.put(exc)
+            raise
+
+        self.logger.info("The background task for %s is done", self.version_tag)
+        self.mark_finished()
+
+    def process_additional_binaries(self) -> None:
         if not self.additional_binaries:
             return
         for name in self.additional_binaries:
@@ -134,18 +153,64 @@ class Release:
             binary_path = self.release_dir / f"clickhouse-{suffix}"
 
             if binary_path.exists():
-                logging.info("Binary for build %s already exists", name)
-                print("Binary for build %s already exists", name)
+                self.logger.info("Binary for build %s already exists", name)
                 continue
 
-            logging.info("Downloading %s to %s", url, binary_path)
-            print("Downloading %s to %s", url, binary_path)
-            download_with_progress(url, binary_path)
+            self.logger.info("Downloading %s to %s", url, binary_path)
+            try:
+                download(url, binary_path)
+            except DownloadException:
+                # We still don't have built binaries for some older releases,
+                # so it's fine to ignore errors here
+                self.logger.warning(
+                    "Can't download additional binaries: %s",
+                    ", ".join(self.additional_binaries),
+                )
+                continue
+            self.logger.info("Upload %s to the release assets", binary_path.name)
+            self.upload_asset(binary_path)
+
+    def upload_asset(self, path: Path) -> None:
+        # The logic that upload_asset() checks the existing on its own doesn't
+        # work, see https://github.com/PyGithub/PyGithub/issues/2385
+        # We must check the release for existing assets.
+        # The reasonable approach is getting assets once on demand at the
+        # upload start
+        if [asset for asset in self.assets if path.name == asset.name]:
+            self.logger.info(
+                "Asset %s already exists for release %s", path.name, self.version_tag
+            )
+            return
+        try:
+            self.gh_release.upload_asset(str(path))
+        except GithubException as e:
+            if e.data["message"] == "Validation Failed" and [
+                True
+                for err in e.data["errors"]
+                if err["code"] == "already_exists"  # type: ignore
+            ]:
+                self.logger.info(
+                    "Asset %s already exists in release %s", path.name, self.version_tag
+                )
+
+    def mark_finished(self):
+        # self.commit.create_status()
+        # upload.logs.to.s3
+        finished = self.release_dir / self.version_tag / "finished"
+        finished.touch()
 
     @staticmethod
     def is_processed(version_tag: str) -> bool:
-        releases_dir = ch.get_releases_dir()
+        releases_dir = get_releases_dir()
         return (releases_dir / version_tag / "finished").exists()
+
+    @staticmethod
+    def log_file(version_tag: str) -> Path:
+        release_dir = get_releases_dir() / version_tag
+        # To avoid chicken <-> egg issue, if somebody requested the file, we
+        # create the directory unless it exists
+        release_dir.mkdir(0o750, parents=True, exist_ok=True)
+        return release_dir / Release.LOG_NAME
 
     @property
     def tag(self) -> GitTag:
@@ -153,8 +218,8 @@ class Release:
             try:
                 # The first tag is received as ref/tags/version_tag, and is highly
                 # likely annotated tag. That's why we need to get the tag from ref.sha
-                ref = self.gh_repo.get_git_ref(f"tags/{self.version_tag}")
-                self._tag = self.gh_repo.get_git_tag(ref.object.sha)
+                ref = self.ch.gh_repo.get_git_ref(f"tags/{self.version_tag}")
+                self._tag = self.ch.gh_repo.get_git_tag(ref.object.sha)
             except UnknownObjectException as exc:
                 raise ReleaseException(
                     f"Tag for version_tag '{self.version_tag}' is not found"
@@ -166,7 +231,7 @@ class Release:
     def commit(self) -> Commit:
         if self._commit is None:
             try:
-                self._commit = self.gh_repo.get_commit(self.tag.object.sha)
+                self._commit = self.ch.gh_repo.get_commit(self.tag.object.sha)
             except UnknownObjectException as exc:
                 raise ReleaseException(
                     f"Tag for version_tag '{self.version_tag}' is not found"
@@ -175,16 +240,23 @@ class Release:
         return self._commit
 
     @property
-    def git_release(self) -> GitRelease:
-        if self._git_release is None:
+    def gh_release(self) -> GitRelease:
+        if self._gh_release is None:
             try:
-                self._git_release = self.gh_repo.get_release(self.version_tag)
+                self._gh_release = self.ch.gh_repo.get_release(self.version_tag)
             except UnknownObjectException as exc:
                 raise ReleaseException(
                     f"Release for version_tag '{self.version_tag}' is not found"
                 ) from exc
 
-        return self._git_release
+        return self._gh_release
+
+    @property
+    def assets(self) -> List[GitReleaseAsset]:
+        """doc"""
+        if not self._assets:
+            self._assets = list(self.gh_release.get_assets())
+        return self._assets
 
     @property
     def packages(self) -> Packages:

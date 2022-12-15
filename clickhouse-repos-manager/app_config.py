@@ -2,9 +2,18 @@
 
 from pathlib import Path
 
-from _vendor.get_robot_token import get_best_robot_token
 from flask import Flask
 
+from _vendor.get_robot_token import get_best_robot_token
+
+DEB_REPO_TEMPLATE = r"""{% for Codename in conf["Codenames"] -%}
+Codename: {{ Codename }}
+{% for name, value in conf.items() -%}
+{% if name != "Codenames" -%}
+{{name}}: {{value}}
+{% endif -%}
+{%- endfor %}
+{% endfor -%}"""
 
 # TODO: tests
 def set_deb_config(app: Flask) -> None:
@@ -31,5 +40,6 @@ def set_config(app: Flask) -> None:
     app.config["WORKING_DIR"] = Path.home() / "clickhouse-repository-manager"
 
     app.config.from_prefixed_env("CHRM")
-    # Do not request the token in advance, only on demand
-    app.config["GITHUB_TOKEN"] = app.config.get("GITHUB_TOKEN", get_best_robot_token())
+    # Do not request the token in advance, only if GITHUB_TOKEN is unset
+    if not "GITHUB_TOKEN" in app.config:
+        app.config["GITHUB_TOKEN"] = get_best_robot_token()
