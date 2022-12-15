@@ -103,7 +103,6 @@ def upload_release(version_tag: str):
     4. Get the additional binaries for the assets, the list is passed as
        'binary' argument
     """
-    breakpoint()
     log_file = Release.log_file(version_tag)
     if Release.is_processed(version_tag) and not request.args.get("force", False):
         return send_file(log_file)
