@@ -4,8 +4,9 @@ from pathlib import Path
 from threading import Lock
 from typing import Dict, List, Union
 
-from _vendor.github_helper import GitHub, Repository
 from flask import current_app, g
+
+from _vendor.github_helper import GitHub, Repository
 
 DebParam = Union[str, List[str]]
 DEB_REPO_TEMPLATE = r"""{% for Codename in conf["Codenames"] -%}
@@ -16,6 +17,9 @@ Codename: {{ Codename }}
 {% endif -%}
 {%- endfor %}
 {% endfor -%}"""
+
+# a global repository lock
+repo_lock = Lock()
 
 # TODO: tests
 def remove_prefix(s: str, prefix: str) -> str:
@@ -113,7 +117,7 @@ def get_update_repo_lock() -> Lock:
     # We must update only one repository at once due indexing
     # and R2 limitations
     if "update_repo_lock" not in g:
-        g.update_repo_lock = Lock()
+        g.update_repo_lock = repo_lock
 
     return g.update_repo_lock
 

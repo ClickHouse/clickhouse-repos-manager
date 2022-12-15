@@ -1,16 +1,20 @@
 #!/usr/bin/env python
+from logging import getLogger
 from pathlib import Path
 from shutil import copy2
 from typing import Dict, List
 
 import subprocess
 
+from jinja2 import Template
+
 from _vendor.shell_runner import Runner
 from context_helper import DEB_REPO_TEMPLATE, DebParam
-from jinja2 import Template
 from packages import Packages, Package
 
 runner = Runner()
+
+logger = getLogger(__name__)
 
 
 def check_dir_exist_or_create(path: Path) -> None:
