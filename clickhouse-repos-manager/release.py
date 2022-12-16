@@ -7,7 +7,7 @@ from typing import List, Optional
 import logging
 
 from github.Commit import Commit
-from github.GithubException import UnknownObjectException
+from github.GithubException import GithubException, UnknownObjectException
 from github.GitRelease import GitRelease
 from github.GitTag import GitTag
 
@@ -68,7 +68,7 @@ class Release:
         )
 
         self._gh_release = None  # type: Optional[GitRelease]
-        _ = self.gh_release
+        _ = self.gh_release  # check if release is created
 
         # The prefix for the commit's builds
         self.builds_prefix = p.join(
@@ -134,7 +134,7 @@ class Release:
                 self.logger.info(
                     "Uploading %s to the release assets", package.path.name
                 )
-                self.gh_release.upload_asset(str(package.path))
+                self.upload_asset(package.path)
 
             self.process_additional_binaries()
 
@@ -173,7 +173,20 @@ class Release:
                 )
                 continue
             self.logger.info("Upload %s to the release assets", binary_path.name)
-            self.gh_release.upload_asset(str(binary_path))
+            self.upload_asset(binary_path)
+
+    def upload_asset(self, path: Path) -> None:
+        try:
+            self.gh_release.upload_asset(str(path))
+        except GithubException as e:
+            if e.data["message"] == "Validation Failed" and [
+                True
+                for err in e.data["errors"]
+                if err["code"] == "already_exists"  # type: ignore
+            ]:
+                self.logger.info(
+                    "Asset %s already exists in release %s", path.name, self.version_tag
+                )
 
     def mark_finished(self):
         # self.commit.create_status()
