@@ -139,7 +139,7 @@ def upload_release(version_tag: str):
             _ = thread
             return jsonify(
                 tag=release.tag.tag,
-                release=release.git_release.title,
+                release=release.gh_release.title,
                 commit=release.commit.sha,
             )
 
