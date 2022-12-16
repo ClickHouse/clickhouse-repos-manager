@@ -27,6 +27,8 @@ class ReleaseException(BaseException):
 
 
 class Release:
+    LOG_NAME = "publish-release.txt"
+
     def __init__(
         self,
         version_tag: str,
@@ -39,6 +41,7 @@ class Release:
         # *do* can be executed in background
         self.version_tag = version_tag
         self.logger = logger
+        self._log_file = self.log_file(version_tag)
         self._verify_version()
         self.version, self.version_type = version_tag[1:].split("-", 1)
         version_parts = self.version.split(".")
@@ -183,7 +186,7 @@ class Release:
         # To avoid chicken <-> egg issue, if somebody requested the file, we
         # create the directory unless it exists
         release_dir.mkdir(0o750, parents=True, exist_ok=True)
-        return release_dir / "publish-release.txt"
+        return release_dir / Release.LOG_NAME
 
     @property
     def tag(self) -> GitTag:
