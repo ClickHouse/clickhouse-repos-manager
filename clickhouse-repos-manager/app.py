@@ -137,7 +137,7 @@ def upload_release(version_tag: str):
 
         def generate_response(thread: Optional[Thread]):
             _ = thread
-            return jsonify(
+            yield jsonify(
                 tag=release.tag.tag,
                 release=release.gh_release.title,
                 commit=release.commit.sha,
