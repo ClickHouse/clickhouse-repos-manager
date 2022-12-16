@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-from logging import getLogger
+from logging import getLogger, Logger
 from pathlib import Path
 from shutil import copy2
-from typing import Dict, List
+from typing import Dict, List, Union
 
 import subprocess
 
@@ -24,6 +24,16 @@ def check_dir_exist_or_create(path: Path) -> None:
         raise RepoException(f"the file {path} must be a directory")
 
 
+def copy_if_not_exists(src: Path, dst: Path) -> Union[Path, str]:
+    if dst.is_dir():
+        dst = dst / src.name
+    if not dst.exists():
+        return copy2(src, dst)
+    if src.stat().st_size == dst.stat().st_size:
+        return dst
+    return copy2(src, dst)
+
+
 class RepoException(BaseException):
     pass
 
@@ -35,7 +45,11 @@ class DebRepo:
     dists_config = _reprepro_config / "conf" / "distributions"
 
     def __init__(
-        self, packages: List[Package], repo_root: Path, repo_config: Dict[str, DebParam]
+        self,
+        packages: List[Package],
+        repo_root: Path,
+        repo_config: Dict[str, DebParam],
+        logger: Logger = logger,
     ):
         non_deb_pkgs = [pkg for pkg in packages if not pkg.path.name.endswith(".deb")]
         if non_deb_pkgs:
@@ -44,6 +58,7 @@ class DebRepo:
         self.packages = packages
         self._repo_config = repo_config
         self._repo_root = repo_root
+        self.logger = logger
         self.check_dirs()
 
     def add_packages(self, version_type: str, *additional_version_types: str):
@@ -95,7 +110,13 @@ class RpmRepo:
     runner("createrepo_c --version")
     runner("gpg --version")
 
-    def __init__(self, packages: List[Package], repo_root: Path, signing_key: str):
+    def __init__(
+        self,
+        packages: List[Package],
+        repo_root: Path,
+        signing_key: str,
+        logger: Logger = logger,
+    ):
         non_rpm_pkgs = [pkg for pkg in packages if not pkg.path.name.endswith(".rpm")]
         if non_rpm_pkgs:
             raise RepoException(f"all packages must end with '.rpm': {non_rpm_pkgs}")
@@ -103,6 +124,7 @@ class RpmRepo:
         self.packages = packages
         self._repo_root = repo_root
         self.signing_key = signing_key
+        self.logger = logger
         check_dir_exist_or_create(self.outdir_path)
 
     def add_packages(self, version_type: str, *additional_version_types: str):
@@ -110,7 +132,7 @@ class RpmRepo:
         check_dir_exist_or_create(dest_dir)
 
         for package in self.packages:
-            copy2(package.path, self.outdir_path / version_type)
+            copy_if_not_exists(package.path, self.outdir_path / version_type)
 
         commands = (
             f"createrepo_c --local-sqlite --workers=2 --update --verbose {dest_dir}",
@@ -133,7 +155,9 @@ class RpmRepo:
 
 
 class TgzRepo:
-    def __init__(self, packages: List[Package], repo_root: Path):
+    def __init__(
+        self, packages: List[Package], repo_root: Path, logger: Logger = logger
+    ):
         non_tgz_pkgs = [
             pkg
             for pkg in packages
@@ -145,6 +169,7 @@ class TgzRepo:
             raise RepoException(f"all packages must end with '.tgz': {non_tgz_pkgs}")
         self.packages = packages
         self._repo_root = repo_root
+        self.logger = logger
         check_dir_exist_or_create(self.outdir_path)
 
     def add_packages(self, version_type: str, *additional_version_types: str):
@@ -152,7 +177,7 @@ class TgzRepo:
         check_dir_exist_or_create(dest_dir)
 
         for package in self.packages:
-            copy2(package.path, self.outdir_path / version_type)
+            copy_if_not_exists(package.path, self.outdir_path / version_type)
 
         for additional_version_type in additional_version_types:
             self.add_packages(additional_version_type)
@@ -171,6 +196,7 @@ class Repos:
         signing_key: str,
         version_type: str,
         *additional_version_types: str,
+        logger: Logger = logger,
     ):
         """
         The class represents three different repositories:
@@ -185,9 +211,18 @@ class Repos:
         self.root = repo_root
         self.version_type = version_type
         self.additional_version_types = list(additional_version_types)
-        self.deb = DebRepo(packages.deb, self.root, deb_config)
-        self.rpm = RpmRepo(packages.rpm, self.root, signing_key)
-        self.tgz = TgzRepo(packages.tgz, self.root)
+        self.logger = logger
+
+        try:
+            self.deb = DebRepo(packages.deb, self.root, deb_config, self.logger)
+            self.rpm = RpmRepo(packages.rpm, self.root, signing_key, self.logger)
+            tgz_packages = packages.tgz + packages.tgz_sha
+            self.tgz = TgzRepo(tgz_packages, self.root, self.logger)
+        except Exception as e:
+            self.logger.exception(
+                "Fail to prepare repositories, exception occure: %s", e
+            )
+            raise RepoException from e
 
     def add_packages(self):
         self.deb.add_packages(self.version_type, *self.additional_version_types)

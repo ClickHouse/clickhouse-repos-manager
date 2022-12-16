@@ -131,6 +131,9 @@ class Release:
                 self.repos.add_packages()
 
             for package in self.packages.all():
+                self.logger.info(
+                    "Uploading %s to the release assets", package.path.name
+                )
                 self.gh_release.upload_asset(str(package.path))
 
             self.process_additional_binaries()
@@ -144,7 +147,7 @@ class Release:
 
         self.logger.info("The background task for %s is done", self.version_tag)
 
-    def process_additional_binaries(self):
+    def process_additional_binaries(self) -> None:
         if not self.additional_binaries:
             return
         for name in self.additional_binaries:

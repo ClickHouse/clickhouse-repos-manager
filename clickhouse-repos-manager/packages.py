@@ -76,43 +76,37 @@ class Packages:
 
                 tgz = path / f"{name}-{version}-{check.deb_arch}.tgz"
                 self.tgz.append(Package(check.check_name, tgz, version))
-                tgz_sha = path / f"{name}-{version}-{check.deb_arch}.tgz.sha512"
-                self.tgz_sha.append(Package(check.check_name, tgz_sha, version))
+                # FIXME: sha512
+                # tgz_sha = path / f"{name}-{version}-{check.deb_arch}.tgz.sha512"
+                # self.tgz_sha.append(Package(check.check_name, tgz_sha, version))
 
     def download(self, overwrite: bool, *packages, logger=logger):
         if not packages:
             packages = ("deb", "rpm", "tgz")
 
+        def log_download(pkg_type: str, pkgs: List[Package]) -> None:
+            logger.info(
+                "Downloading %s packages:\n  %s",
+                pkg_type,
+                "\n  ".join(p.path.name for p in pkgs),
+            )
+
         # Boilerplating to have a proper type hinting
         if "deb" in packages:
-            logger.info(
-                "Downloading deb packages:\n  %s",
-                "\n  ".join(p.path.name for p in self.deb),
-            )
+            log_download("deb", self.deb)
             for package in self.deb:
                 package.download(self.url_prefix, overwrite, logger)
         if "rpm" in packages:
-            logger.info(
-                "Downloading rpm packages:\n  %s",
-                "\n  ".join(p.path.name for p in self.rpm),
-            )
+            log_download("rpm", self.rpm)
             for package in self.rpm:
                 package.download(self.url_prefix, overwrite, logger)
         if "tgz" in packages:
-            logger.info(
-                "Downloading deb packages:\n  %s",
-                "\n  ".join(p.path.name for p in self.tgz),
-            )
+            log_download("tgz", self.tgz)
             for package in self.tgz:
                 package.download(self.url_prefix, overwrite, logger)
-            # Add it when the tgz.sha512 will be in all releases
-            # logger.info(
-            #     "Downloading deb packages:\n  %s",
-            #     "  \n".join(p.path.name for p in self.tgz_sha512),
-            # )
-            # self.tgz.extend(self.tgz_sha)
-            # for package in self.tgz_sha:
-            #    package.download(self.url_prefix, overwrite)
+            log_download("tgz_sha", self.tgz_sha)
+            for package in self.tgz_sha:
+                package.download(self.url_prefix, overwrite, logger)
 
     def all(self) -> Iterator[Package]:
         for packages in (self.deb, self.rpm, self.tgz, self.tgz_sha):
