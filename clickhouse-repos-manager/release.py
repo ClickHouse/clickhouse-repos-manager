@@ -121,6 +121,8 @@ class Release:
         try:
             self.packages.download(False, logger=self.logger)
 
+            # FIXME: think about checking if the SAME release is launched twice
+
             if self.update_repo_lock.locked():
                 self.logger.info(
                     "The repositories are already updating by another process, waiting"
@@ -129,7 +131,7 @@ class Release:
                 self.repos.add_packages()
 
             for package in self.packages.all():
-                self.gh_release.upload_asset(package.path)
+                self.gh_release.upload_asset(str(package.path))
 
             self.process_additional_binaries()
 
@@ -168,7 +170,7 @@ class Release:
                 )
                 continue
             self.logger.info("Upload %s to the release assets", binary_path.name)
-            self.gh_release(binary_path)
+            self.gh_release.upload_asset(str(binary_path))
 
     def mark_finished(self):
         # self.commit.create_status()

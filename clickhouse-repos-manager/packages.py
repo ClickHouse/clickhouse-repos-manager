@@ -101,7 +101,7 @@ class Packages:
         if "tgz" in packages:
             logger.info(
                 "Downloading deb packages:\n  %s",
-                "  \n".join(p.path.name for p in self.tgz),
+                "\n  ".join(p.path.name for p in self.tgz),
             )
             for package in self.tgz:
                 package.download(self.url_prefix, overwrite, logger)
