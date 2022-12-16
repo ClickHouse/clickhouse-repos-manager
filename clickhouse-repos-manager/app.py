@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import logging
 from logging.handlers import QueueHandler
 from queue import Queue
@@ -118,6 +119,7 @@ def upload_release(version_tag: str):
         queue_handler = QueueHandler(log_queue)
         queue_handler.setFormatter(formatter)
         logger.addHandler(queue_handler)
+        mimetype = "text/plain"
         status = 200
 
         def generate_response(thread: Optional[Thread]):
@@ -134,13 +136,16 @@ def upload_release(version_tag: str):
 
     else:
         status = 202
+        mimetype = "application/json"
 
         def generate_response(thread: Optional[Thread]):
             _ = thread
-            yield jsonify(
-                tag=release.tag.tag,
-                release=release.gh_release.title,
-                commit=release.commit.sha,
+            yield json.dumps(
+                dict(
+                    tag=release.tag.tag,
+                    release=release.gh_release.title,
+                    commit=release.commit.sha,
+                )
             )
 
     file_handler = logging.FileHandler(log_file, "w")
@@ -163,7 +168,7 @@ def upload_release(version_tag: str):
         )
         return str(e.with_traceback), 500
 
-    return Response(generate_response(thread), status=status)
+    return Response(generate_response(thread), mimetype=mimetype, status=status)
 
 
 if __name__ == "__main__":

@@ -87,14 +87,14 @@ class Packages:
         if "deb" in packages:
             logger.info(
                 "Downloading deb packages:\n  %s",
-                "  \n".join(p.path.name for p in self.deb),
+                "\n  ".join(p.path.name for p in self.deb),
             )
             for package in self.deb:
                 package.download(self.url_prefix, overwrite, logger)
         if "rpm" in packages:
             logger.info(
                 "Downloading rpm packages:\n  %s",
-                "  \n".join(p.path.name for p in self.rpm),
+                "\n  ".join(p.path.name for p in self.rpm),
             )
             for package in self.rpm:
                 package.download(self.url_prefix, overwrite, logger)
