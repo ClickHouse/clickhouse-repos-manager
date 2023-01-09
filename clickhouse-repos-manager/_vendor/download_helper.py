@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 import logging
 import sys
 import time
@@ -26,14 +26,14 @@ def get_with_retries(
     logger.info(
         "Getting URL with %i tries and sleep %i in between: %s", retries, sleep, url
     )
-    exc = None  # type: Optional[Exception]
+    exc = None  # type: Optional[Union[Exception, BaseException]]
     for i in range(retries):
         try:
             timeout = kwargs.pop("timeout", 20)
             response = requests.get(url, timeout=timeout, **kwargs)
             response.raise_for_status()
             break
-        except Exception as e:
+        except (BaseException, Exception) as e:
             if i + 1 < retries:
                 logger.info("Exception '%s' while getting, retry %i", e, i + 1)
                 time.sleep(sleep)
@@ -66,9 +66,9 @@ def download(
                     total_length = int(total_length)
                     logger.info("Content length is %ld bytes", total_length)
                     for data in response.iter_content(chunk_size=4096):
-                        dl += len(data)
                         f.write(data)
                         if with_progress:
+                            dl += len(data)
                             done = int(50 * dl / total_length)
                             percent = int(100 * float(dl) / total_length)
                             eq_str = "=" * done
@@ -77,7 +77,7 @@ def download(
                             sys.stdout.flush()
             path_tmp.rename(path)
             break
-        except Exception:
+        except (BaseException, Exception) as e:
             if with_progress:
                 sys.stdout.write("\n")
             if i + 1 < DOWNLOAD_RETRIES_COUNT:

@@ -235,7 +235,7 @@ class Repos:
             self.rpm = RpmRepo(packages.rpm, self.root, signing_key, self.logger)
             tgz_packages = packages.tgz + packages.tgz_sha
             self.tgz = TgzRepo(tgz_packages, self.root, self.logger)
-        except Exception as e:
+        except (BaseException, Exception) as e:
             self.logger.exception(
                 "Fail to prepare repositories, exception occure: %s", e
             )

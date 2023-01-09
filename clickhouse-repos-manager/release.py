@@ -131,7 +131,7 @@ class Release:
 
             self.process_additional_binaries()
 
-        except Exception as e:
+        except (BaseException, Exception) as e:
             exc = ReleaseException(
                 f"exception occured during release {self.version_tag}"
             ).with_traceback(e.__traceback__)

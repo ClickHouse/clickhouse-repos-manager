@@ -38,7 +38,7 @@ class Package:
             # join doesn't remove double slash from the url_prefix,
             # that's why it's used instead of Path
             download(p.join(url_prefix, self.s3_suffix), self.path, logger=logger)
-        except Exception as e:
+        except (BaseException, Exception) as e:
             logger.error("Failed to download package %s, removing", self.name)
             self.path.unlink(True)
             logger.error("Exception: %s", e.with_traceback)
