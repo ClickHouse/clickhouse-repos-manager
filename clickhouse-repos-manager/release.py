@@ -197,7 +197,7 @@ class Release:
     def mark_finished(self):
         # self.commit.create_status()
         # upload.logs.to.s3
-        finished = self.release_dir / self.version_tag / "finished"
+        finished = self.release_dir / "finished"
         finished.touch()
 
     @staticmethod
