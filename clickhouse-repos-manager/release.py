@@ -9,6 +9,7 @@ import logging
 from github.Commit import Commit
 from github.GithubException import GithubException, UnknownObjectException
 from github.GitRelease import GitRelease
+from github.GitReleaseAsset import GitReleaseAsset
 from github.GitTag import GitTag
 
 from _vendor.ci_config import CI_CONFIG, BuildConfig
@@ -63,6 +64,7 @@ class Release:
 
         self._tag = None  # type: Optional[GitTag]
         self._commit = None  # type: Optional[Commit]
+        self._assets = []  # type: List[GitReleaseAsset]
         self.logger.info(
             "The release is created for tag %s and commit %s", self.tag, self.commit
         )
@@ -176,6 +178,15 @@ class Release:
             self.upload_asset(binary_path)
 
     def upload_asset(self, path: Path) -> None:
+        # The logic that upload_asset() checks the existing on its own doesn't
+        # work, see https://github.com/PyGithub/PyGithub/issues/2385
+        # We must check the release for existing assets.
+        # The reasonable approach is getting assets once on demand at the
+        # upload start
+        if [asset for asset in self.assets if path.name == asset.name]:
+            self.logger.info(
+                "Asset %s already exists for release %s", path.name, self.version_tag
+            )
         try:
             self.gh_release.upload_asset(str(path))
         except GithubException as e:
@@ -244,6 +255,13 @@ class Release:
                 ) from exc
 
         return self._gh_release
+
+    @property
+    def assets(self) -> List[GitReleaseAsset]:
+        """doc"""
+        if not self._assets:
+            self._assets = list(self.gh_release.get_assets())
+        return self._assets
 
     @property
     def packages(self) -> Packages:
