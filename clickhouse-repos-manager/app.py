@@ -166,12 +166,12 @@ def upload_release(version_tag: str):
         release = Release(version_tag, logger, request.args.getlist("binary"))
     except ReleaseException as e:
         return str(e), 400
-    except BaseException as e:
+    except (BaseException, Exception) as e:
         return str(e), 500
 
     try:
         thread = release.do(False)
-    except Exception as e:
+    except (BaseException, Exception) as e:
         logger.error(
             "Exception occured during the release process: %s", e.with_traceback
         )
