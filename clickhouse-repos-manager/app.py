@@ -110,7 +110,7 @@ def upload_release(version_tag: str):
 
     logger = logging.getLogger(f"release-{version_tag}")
     logger.setLevel(logging.INFO)
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s\n")
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
     # Create a handler for returning text to the response body
     sync = request.args.get("sync", default=False, type=to_bool)
