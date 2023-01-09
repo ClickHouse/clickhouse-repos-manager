@@ -74,8 +74,9 @@ class DebRepo:
     def process_additional_packages(
         self, original_version_type: str, additional_version_type: str
     ):
+        # pair of package-name=version
         packages_with_versions = " ".join(
-            f"{pkg.path}={pkg.version}" for pkg in self.packages
+            f"{pkg.path.stem}={pkg.version}" for pkg in self.packages
         )
         command = (
             f"{self.reprepro_cmd} copy {additional_version_type} "
