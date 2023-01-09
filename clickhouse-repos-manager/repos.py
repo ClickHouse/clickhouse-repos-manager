@@ -64,7 +64,10 @@ class DebRepo:
     def add_packages(self, version_type: str, *additional_version_types: str):
         deb_files = " ".join(pkg.path.as_posix() for pkg in self.packages)
         command = f"{self.reprepro_cmd} includedeb '{version_type}' {deb_files}"
-        runner(command)
+        self.logger.info("Deploying DEB packages to codename %s", version_type)
+        self.logger.info(
+            "Deployment logs:\n%s", runner(command, stderr=subprocess.STDOUT)
+        )
         for additional_version_type in additional_version_types:
             self.process_additional_packages(version_type, additional_version_type)
 
@@ -78,7 +81,12 @@ class DebRepo:
             f"{self.reprepro_cmd} copy {additional_version_type} "
             f"{original_version_type} {packages_with_versions}"
         )
-        runner(command)
+        self.logger.info(
+            "Deploying DEB packages to additional codename %s", additional_version_type
+        )
+        self.logger.info(
+            "Deployment logs:\n%s", runner(command, stderr=subprocess.STDOUT)
+        )
 
     def check_dirs(self):
         dists_config = self._repo_root / self.dists_config
@@ -139,11 +147,17 @@ class RpmRepo:
             f"gpg --sign-with {self.signing_key} --detach-sign --batch --yes "
             f"--armor {dest_dir / 'repodata' / 'repomd.xml'}",
         )
+        self.logger.info("Deploying RPM packages to %s", version_type)
         for command in commands:
-            runner(command)
+            self.logger.info(
+                "Output for command %s:\n%s",
+                command.split(maxsplit=1)[0],
+                runner(command, stderr=subprocess.STDOUT),
+            )
 
         update_public_key = f"gpg --armor --export {self.signing_key}"
         pub_key_path = dest_dir / "repodata" / "repomd.xml.key"
+        self.logger.info("Updating repomd.xml.key")
         pub_key_path.write_text(runner(update_public_key))
 
         for additional_version_type in additional_version_types:
@@ -175,6 +189,7 @@ class TgzRepo:
     def add_packages(self, version_type: str, *additional_version_types: str):
         dest_dir = self.outdir_path / version_type
         check_dir_exist_or_create(dest_dir)
+        self.logger.info("Deploying TGZ packages to %s", version_type)
 
         for package in self.packages:
             copy_if_not_exists(package.path, self.outdir_path / version_type)

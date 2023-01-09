@@ -146,8 +146,10 @@ class Release:
             ).with_traceback(e.__traceback__)
             self.logger.exception(exc)
             self.exceptions.put(exc)
+            raise
 
         self.logger.info("The background task for %s is done", self.version_tag)
+        self.mark_finished()
 
     def process_additional_binaries(self) -> None:
         if not self.additional_binaries:
@@ -187,6 +189,7 @@ class Release:
             self.logger.info(
                 "Asset %s already exists for release %s", path.name, self.version_tag
             )
+            return
         try:
             self.gh_release.upload_asset(str(path))
         except GithubException as e:
@@ -201,6 +204,7 @@ class Release:
 
     def mark_finished(self):
         # self.commit.create_status()
+        # upload.logs.to.s3
         finished = self.release_dir / self.version_tag / "finished"
         finished.touch()
 

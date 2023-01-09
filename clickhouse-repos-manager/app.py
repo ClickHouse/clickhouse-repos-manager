@@ -125,8 +125,8 @@ def upload_release(version_tag: str):
         def generate_response(thread: Optional[Thread]):
             if thread is None:
                 raise TypeError("thread must be a Thread")
-            sleep(0.2)
             # to fix a potential issue
+            sleep(0.2)
             while thread.is_alive():
                 if not log_queue.empty():
                     yield log_queue.get().getMessage()
@@ -135,6 +135,11 @@ def upload_release(version_tag: str):
                 # prevent quick switch from thread to thread
                 sleep(1)
 
+            # read all logs from the queue to the output
+            while not log_queue.empty():
+                yield log_queue.get().getMessage()
+
+            # And fail the request on an error
             if not release.exceptions.empty():
                 raise release.exceptions.get()
 
