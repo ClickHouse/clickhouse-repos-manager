@@ -49,6 +49,7 @@ def download(
     url: str, path: Path, with_progress: bool = False, logger: logging.Logger = logger
 ):
     logger.info("Downloading from %s to path %s", url, path)
+    with_progress = with_progress and sys.stdout.isatty()
     path_tmp = path.with_suffix(".tmp")
     for i in range(DOWNLOAD_RETRIES_COUNT):
         try:
@@ -67,7 +68,7 @@ def download(
                     for data in response.iter_content(chunk_size=4096):
                         dl += len(data)
                         f.write(data)
-                        if sys.stdout.isatty() and with_progress:
+                        if with_progress:
                             done = int(50 * dl / total_length)
                             percent = int(100 * float(dl) / total_length)
                             eq_str = "=" * done
@@ -77,7 +78,7 @@ def download(
             path_tmp.rename(path)
             break
         except Exception:
-            if sys.stdout.isatty() and with_progress:
+            if with_progress:
                 sys.stdout.write("\n")
             if i + 1 < DOWNLOAD_RETRIES_COUNT:
                 time.sleep(3)
@@ -88,6 +89,6 @@ def download(
             f"Cannot download dataset from {url}, all retries exceeded"
         )
 
-    if sys.stdout.isatty() and with_progress:
+    if with_progress:
         sys.stdout.write("\n")
     logger.info("Downloading finished")
