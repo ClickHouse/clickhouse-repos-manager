@@ -76,7 +76,7 @@ class DebRepo:
     ):
         # pair of package-name=version
         packages_with_versions = " ".join(
-            f"{pkg.path.stem}={pkg.version}" for pkg in self.packages
+            f"{pkg.path.stem.split('_', 1)[0]}={pkg.version}" for pkg in self.packages
         )
         command = (
             f"{self.reprepro_cmd} copy {additional_version_type} "
