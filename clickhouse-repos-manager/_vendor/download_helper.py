@@ -54,7 +54,7 @@ def download(
     for i in range(DOWNLOAD_RETRIES_COUNT):
         try:
             with open(path_tmp, "wb") as f:
-                response = get_with_retries(url, retries=1, stream=True)
+                response = get_with_retries(url, retries=1, stream=True, logger=logger)
                 total_length = response.headers.get("content-length")
                 if total_length is None or int(total_length) == 0:
                     logger.info(
