@@ -88,6 +88,7 @@ class Release:
             ch.get_signing_key(),
             self.version_type,
             *self.additional_version_types,
+            logger=self.logger,
         )
 
     def do(self, synchronous: bool) -> Optional[Thread]:
