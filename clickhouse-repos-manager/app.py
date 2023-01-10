@@ -129,7 +129,7 @@ def upload_release(version_tag: str):
             sleep(0.2)
             while thread.is_alive():
                 if not log_queue.empty():
-                    yield log_queue.get().getMessage()
+                    yield log_queue.get().getMessage() + "\n"
                     continue
 
                 # prevent quick switch from thread to thread
