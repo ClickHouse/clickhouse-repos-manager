@@ -100,7 +100,7 @@ def get_s3_client() -> S3Client:
 
 
 # TODO: tests
-def get_s3_reports_bucket() -> str:
+def get_s3_test_reports_bucket() -> str:
     if "s3_reports_bucket" not in g:
         g.s3_reports_bucket = current_app.config["S3_TEST_REPORTS_BUCKET"]
 
@@ -108,13 +108,13 @@ def get_s3_reports_bucket() -> str:
 
 
 # TODO: tests
-def get_s3_reports_url() -> str:
-    if "s3_reports_url" not in g:
-        g.s3_reports_url = p.join(
+def get_s3_test_reports_url() -> str:
+    if "s3_test_reports_url" not in g:
+        g.s3_test_reports_url = p.join(
             current_app.config["S3_URL"], current_app.config["S3_TEST_REPORTS_BUCKET"]
         )
 
-    return g.s3_reports_url
+    return g.s3_test_reports_url
 
 
 # TODO: tests
@@ -156,5 +156,6 @@ class ContextHelper:
         # Set the S3 artifacts download url and test reports upload bucket
         self.s3_builds_url = get_s3_builds_url()
         self.s3_client = get_s3_client()
-        self.s3_test_reports_bucket = get_s3_reports_bucket()
+        self.s3_test_reports_bucket = get_s3_test_reports_bucket()
+        self.s3_test_reports_url = get_s3_test_reports_url()
         self.signing_key = get_signing_key()

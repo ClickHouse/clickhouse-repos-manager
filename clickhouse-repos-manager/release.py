@@ -131,6 +131,7 @@ class Release:
                 self.upload_asset(package.path)
 
             self.process_additional_binaries()
+            self.mark_finished()
 
         except (BaseException, Exception) as e:
             exc = ReleaseException(
@@ -141,7 +142,6 @@ class Release:
             raise
 
         self.logger.info("The background task for %s is done", self.version_tag)
-        self.mark_finished()
 
     def process_additional_binaries(self) -> None:
         if not self.additional_binaries:
@@ -195,10 +195,27 @@ class Release:
                 )
 
     def mark_finished(self):
-        # self.commit.create_status()
-        # upload.logs.to.s3
+        self.logger.info("Mark the release as finished")
         finished = self.release_dir / "finished"
         finished.touch()
+        self.logger.info("Upload log file to S3")
+        key = p.join(
+            self.release_branch, self.commit.sha, "release", self._log_file.name
+        )
+        metadata = {"ContentType": "text/plain; charset=utf-8"}
+        self.ch.s3_client.upload_file(
+            self._log_file,
+            self.ch.s3_test_reports_bucket,
+            key,
+            ExtraArgs=metadata,
+        )
+        log_url = p.join(self.ch.s3_test_reports_url, key)
+        self.commit.create_status(
+            "success",
+            log_url,
+            "Release artifacts successfully deployed",
+            "Release deployment",
+        )
 
     @staticmethod
     def is_processed(version_tag: str) -> bool:
