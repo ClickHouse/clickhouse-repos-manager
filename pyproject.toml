@@ -13,6 +13,7 @@ python = "^3.10"
 Flask = "^2.2.2"
 PyGithub = "^1.55"
 boto3 = "^1.24.85"
+uwsgi = "^2.0.21"
 
 
 [build-system]
