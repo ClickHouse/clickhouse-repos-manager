@@ -5,6 +5,9 @@ from pathlib import Path
 from flask import Flask
 
 from _vendor.get_robot_token import get_best_robot_token
+from _vendor.shell_runner import Runner
+
+runner = Runner()
 
 DEB_REPO_TEMPLATE = r"""{% for Codename in conf["Codenames"] -%}
 Codename: {{ Codename }}
@@ -43,3 +46,10 @@ def set_config(app: Flask) -> None:
     # Do not request the token in advance, only if GITHUB_TOKEN is unset
     if not "GITHUB_TOKEN" in app.config:
         app.config["GITHUB_TOKEN"] = get_best_robot_token()
+
+    check_config(app)
+
+
+def check_config(app: Flask) -> None:
+    # Check that secret gpg key exist and available
+    runner(f"gpg --list-secret-keys {app.config['SIGNING_KEY']}")
