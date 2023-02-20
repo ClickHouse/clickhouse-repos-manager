@@ -55,11 +55,15 @@ def root():
 
 
 @app.route("/release/", methods=["GET"])
-@app.route("/release/<string:version>", methods=["GET"])
-def get_release(version: Optional[str] = None):
-    if version:
-        return jsonify({"version": version})
-    return jsonify(["all", "versions"])
+@app.route("/release/<string:version_tag>", methods=["GET"])
+def get_release(version_tag: Optional[str] = None):
+    if version_tag:
+        if Release.is_processed(version_tag):
+            log_file = Release.log_file(version_tag)
+            return send_file(log_file)
+        return f"Tag {version_tag} is not found", 404
+
+    return jsonify(list(release.name for release in get_releases_dir().glob("*")))
 
 
 @app.route("/release/<string:version_tag>", methods=["POST"])
