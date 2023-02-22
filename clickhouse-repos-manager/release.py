@@ -3,7 +3,7 @@ from os import path as p
 from pathlib import Path
 from queue import Queue
 from threading import Thread
-from typing import List, Optional
+from typing import List, Optional, Literal
 import logging
 
 from github.Commit import Commit
@@ -21,6 +21,10 @@ from context_helper import ContextHelper, get_releases_dir
 
 
 logger = logging.getLogger(__name__)
+
+SUCCESS = "success"
+FAILURE = "failure"
+STATUS = Literal["success", "failure"]
 
 
 class ReleaseException(BaseException):
@@ -131,7 +135,7 @@ class Release:
                 self.upload_asset(package.path)
 
             self.process_additional_binaries()
-            self.mark_finished()
+            self.mark_finished(SUCCESS)
 
         except (BaseException, Exception) as e:
             exc = ReleaseException(
@@ -139,6 +143,7 @@ class Release:
             ).with_traceback(e.__traceback__)
             self.logger.exception(exc)
             self.exceptions.put(exc)
+            self.mark_finished(FAILURE)
             raise
 
         self.logger.info("The background task for %s is done", self.version_tag)
@@ -194,7 +199,7 @@ class Release:
                     "Asset %s already exists in release %s", path.name, self.version_tag
                 )
 
-    def mark_finished(self):
+    def mark_finished(self, status: STATUS):
         self.logger.info("Mark the release as finished")
         finished = self.release_dir / "finished"
         finished.touch()
@@ -209,11 +214,15 @@ class Release:
             key,
             ExtraArgs=metadata,
         )
+        if status == SUCCESS:
+            description = "Release artifacts successfully deployed"
+        elif status == FAILURE:
+            description = "Failed to deploy release artifacts"
         log_url = p.join(self.ch.s3_test_reports_url, key)
         self.commit.create_status(
-            "success",
+            status,
             log_url,
-            "Release artifacts successfully deployed",
+            description,
             "Release deployment",
         )
 
