@@ -33,8 +33,10 @@ From the root of the repository:
 
 ```
 poetry update
-while true; do CHRM_WORKING_DIR=~/ebs/clickhouse-repos-manager poetry run uwsgi --http=[::]:5000 --chdir=clickhouse-repos-manager --module=app --callable=app --http-timeout=3600 --processes=1 --enable-threads; sleep 10; done
+while true; do CHRM_WORKING_DIR=~/ebs/clickhouse-repos-manager poetry run uwsgi --http=[::]:5000 --chdir=clickhouse-repos-manager --module=app --callable=app --http-timeout=10800 --processes=1 --enable-threads; sleep 10; done
 ```
+
+The service runs in a single-threaded single-process mode, so the request will be blocked until existing finished.
 
 TODO: a proper systemd.service
 
