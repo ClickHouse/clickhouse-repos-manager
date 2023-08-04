@@ -3,7 +3,7 @@ from os import path as p
 from pathlib import Path
 from queue import Queue
 from threading import Thread
-from typing import List, Optional, Literal
+from typing import Final, List, Optional, Literal
 import logging
 
 from github.Commit import Commit
@@ -22,8 +22,8 @@ from context_helper import ContextHelper, get_releases_dir
 
 logger = logging.getLogger(__name__)
 
-SUCCESS = "success"
-FAILURE = "failure"
+SUCCESS: Final = "success"
+FAILURE: Final = "failure"
 STATUS = Literal["success", "failure"]
 
 
@@ -106,7 +106,7 @@ class Release:
         thread.start()
         return thread
 
-    def _verify_version(self):
+    def _verify_version(self) -> None:
         try:
             check_tag(self.version_tag)
         except ValueError as exc:
@@ -115,7 +115,7 @@ class Release:
                 "v11.2.3.44-{lts,prestable,stable,testing}",
             ) from exc
 
-    def _background_do(self):
+    def _background_do(self) -> None:
         try:
             self.packages.download(False, logger=self.logger)
 
@@ -296,7 +296,7 @@ class Release:
         return self._packages
 
     @packages.setter
-    def packages(self, packages: Packages):
+    def packages(self, packages: Packages) -> None:
         self._packages = packages
 
     @property
