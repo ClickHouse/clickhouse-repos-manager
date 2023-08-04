@@ -12,7 +12,7 @@ from github.GitRelease import GitRelease
 from github.GitReleaseAsset import GitReleaseAsset
 from github.GitTag import GitTag
 
-from _vendor.ci_config import CI_CONFIG, BuildConfig
+from _vendor.ci_config import CI_CONFIG
 from _vendor.download_helper import download, DownloadException
 from _vendor.github_helper import check_tag
 from packages import Packages
@@ -154,8 +154,8 @@ class Release:
         for name in self.additional_binaries:
             url = p.join(self.builds_prefix, name, "clickhouse")
 
-            config = CI_CONFIG["build_config"][name]  # type: BuildConfig
-            suffix = config.get("static_binary_name", name)
+            config = CI_CONFIG.build_config[name]
+            suffix = config.static_binary_name or name
             binary_path = self.release_dir / f"clickhouse-{suffix}"
 
             if binary_path.exists():
