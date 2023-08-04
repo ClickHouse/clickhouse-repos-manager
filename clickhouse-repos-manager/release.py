@@ -132,7 +132,7 @@ class Release:
                 self.logger.info(
                     "Uploading %s to the release assets", package.path.name
                 )
-                self.upload_asset(package.path)
+                self.upload_asset_with_retries(package.path)
 
             self.process_additional_binaries()
             self.mark_finished(SUCCESS)
@@ -174,7 +174,24 @@ class Release:
                 )
                 continue
             self.logger.info("Upload %s to the release assets", binary_path.name)
-            self.upload_asset(binary_path)
+            self.upload_asset_with_retries(binary_path)
+
+    def upload_asset_with_retries(self, path: Path, retries: int = 5) -> None:
+        "The function retries to upload asset with progressive sleep between attempts"
+        for attempt in range(retries):
+            try:
+                self.upload_asset(path)
+                return
+            except (BaseException, Exception) as e:
+                if attempt + 1 < retries:
+                    self.logger.warning(
+                        "Uploading of %s failed with exception '%s', retry %i",
+                        path,
+                        e,
+                        attempt + 1,
+                    )
+                    continue
+                raise
 
     def upload_asset(self, path: Path) -> None:
         # The logic that upload_asset() checks the existing on its own doesn't
@@ -190,14 +207,16 @@ class Release:
         try:
             self.gh_release.upload_asset(str(path))
         except GithubException as e:
-            if e.data["message"] == "Validation Failed" and [
+            if e.data.get("message", "") == "Validation Failed" and [  # type: ignore
                 True
-                for err in e.data["errors"]
-                if err["code"] == "already_exists"  # type: ignore
+                for err in e.data.get("errors", {})  # type: ignore
+                if err.get("code", "") == "already_exists"  # type: ignore
             ]:
                 self.logger.info(
                     "Asset %s already exists in release %s", path.name, self.version_tag
                 )
+                return
+            raise
 
     def mark_finished(self, status: STATUS) -> None:
         self.logger.info("Mark the release as finished with status '%s'", status)
