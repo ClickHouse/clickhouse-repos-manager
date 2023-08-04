@@ -199,10 +199,12 @@ class Release:
                     "Asset %s already exists in release %s", path.name, self.version_tag
                 )
 
-    def mark_finished(self, status: STATUS):
-        self.logger.info("Mark the release as finished")
-        finished = self.release_dir / "finished"
-        finished.touch()
+    def mark_finished(self, status: STATUS) -> None:
+        self.logger.info("Mark the release as finished with status '%s'", status)
+        # ???: The failed release shouldn't create the mark preventing restart
+        if status == SUCCESS:
+            finished = self.release_dir / "finished"
+            finished.touch()
         self.logger.info("Upload log file to S3")
         key = p.join(
             self.release_branch, self.commit.sha, "release", self._log_file.name
