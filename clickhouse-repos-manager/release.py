@@ -3,6 +3,7 @@ from os import path as p
 from pathlib import Path
 from queue import Queue
 from threading import Thread
+from time import sleep
 from typing import Final, List, Optional, Literal
 import logging
 
@@ -185,11 +186,13 @@ class Release:
             except (BaseException, Exception) as e:
                 if attempt + 1 < retries:
                     self.logger.warning(
-                        "Uploading of %s failed with exception '%s', retry %i",
+                        "Uploading of %s failed with exception '%s', attempt %i",
                         path,
                         e,
                         attempt + 1,
                     )
+                    # Progressive sleep between retries
+                    sleep(sum(range(attempt + 1)) + 1)
                     continue
                 raise
 
