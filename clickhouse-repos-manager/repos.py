@@ -29,10 +29,10 @@ def copy_if_not_exists(src: Path, dst: Path) -> Union[Path, str]:
     if dst.is_dir():
         dst = dst / src.name
     if not dst.exists():
-        return copy2(src, dst)
+        return copy2(src, dst)  # type: ignore
     if src.stat().st_size == dst.stat().st_size:
         return dst
-    return copy2(src, dst)
+    return copy2(src, dst)  # type: ignore
 
 
 class RepoException(BaseException):
@@ -62,7 +62,7 @@ class DebRepo:
         self.logger = logger
         self.check_dirs()
 
-    def add_packages(self, version_type: str, *additional_version_types: str):
+    def add_packages(self, version_type: str, *additional_version_types: str) -> None:
         deb_files = " ".join(pkg.path.as_posix() for pkg in self.packages)
         command = f"{self.reprepro_cmd} includedeb '{version_type}' {deb_files}"
         self.logger.info("Deploying DEB packages to codename %s", version_type)
@@ -74,7 +74,7 @@ class DebRepo:
 
     def process_additional_packages(
         self, original_version_type: str, additional_version_type: str
-    ):
+    ) -> None:
         # pair of package-name=version
         packages_with_versions = " ".join(
             set(
@@ -93,7 +93,7 @@ class DebRepo:
             "Deployment logs:\n%s", runner(command, stderr=subprocess.STDOUT)
         )
 
-    def check_dirs(self):
+    def check_dirs(self) -> None:
         dists_config = self._repo_root / self.dists_config
         check_dir_exist_or_create(dists_config.parent)
         if not dists_config.exists():
@@ -140,7 +140,7 @@ class RpmRepo:
         self.logger = logger
         check_dir_exist_or_create(self.outdir_path)
 
-    def add_packages(self, version_type: str, *additional_version_types: str):
+    def add_packages(self, version_type: str, *additional_version_types: str) -> None:
         dest_dir = self.outdir_path / version_type
         check_dir_exist_or_create(dest_dir)
 
@@ -192,7 +192,7 @@ class TgzRepo:
         self.logger = logger
         check_dir_exist_or_create(self.outdir_path)
 
-    def add_packages(self, version_type: str, *additional_version_types: str):
+    def add_packages(self, version_type: str, *additional_version_types: str) -> None:
         dest_dir = self.outdir_path / version_type
         check_dir_exist_or_create(dest_dir)
         self.logger.info("Deploying TGZ packages to %s", version_type)
@@ -245,7 +245,7 @@ class Repos:
             )
             raise RepoException from e
 
-    def add_packages(self):
+    def add_packages(self) -> None:
         self.deb.add_packages(self.version_type, *self.additional_version_types)
         self.rpm.add_packages(self.version_type, *self.additional_version_types)
         self.tgz.add_packages(self.version_type, *self.additional_version_types)

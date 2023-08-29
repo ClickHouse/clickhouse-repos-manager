@@ -3,7 +3,8 @@ from os import path as p
 from pathlib import Path
 from queue import Queue
 from threading import Thread
-from typing import List, Optional, Literal
+from time import sleep
+from typing import Final, List, Optional, Literal
 import logging
 
 from github.Commit import Commit
@@ -12,7 +13,7 @@ from github.GitRelease import GitRelease
 from github.GitReleaseAsset import GitReleaseAsset
 from github.GitTag import GitTag
 
-from _vendor.ci_config import CI_CONFIG, BuildConfig
+from _vendor.ci_config import CI_CONFIG
 from _vendor.download_helper import download, DownloadException
 from _vendor.github_helper import check_tag
 from packages import Packages
@@ -22,8 +23,8 @@ from context_helper import ContextHelper, get_releases_dir
 
 logger = logging.getLogger(__name__)
 
-SUCCESS = "success"
-FAILURE = "failure"
+SUCCESS: Final = "success"
+FAILURE: Final = "failure"
 STATUS = Literal["success", "failure"]
 
 
@@ -106,7 +107,7 @@ class Release:
         thread.start()
         return thread
 
-    def _verify_version(self):
+    def _verify_version(self) -> None:
         try:
             check_tag(self.version_tag)
         except ValueError as exc:
@@ -115,7 +116,7 @@ class Release:
                 "v11.2.3.44-{lts,prestable,stable,testing}",
             ) from exc
 
-    def _background_do(self):
+    def _background_do(self) -> None:
         try:
             self.packages.download(False, logger=self.logger)
 
@@ -132,7 +133,7 @@ class Release:
                 self.logger.info(
                     "Uploading %s to the release assets", package.path.name
                 )
-                self.upload_asset(package.path)
+                self.upload_asset_with_retries(package.path)
 
             self.process_additional_binaries()
             self.mark_finished(SUCCESS)
@@ -154,8 +155,8 @@ class Release:
         for name in self.additional_binaries:
             url = p.join(self.builds_prefix, name, "clickhouse")
 
-            config = CI_CONFIG["build_config"][name]  # type: BuildConfig
-            suffix = config.get("static_binary_name", name)
+            config = CI_CONFIG.build_config[name]
+            suffix = config.static_binary_name or name
             binary_path = self.release_dir / f"clickhouse-{suffix}"
 
             if binary_path.exists():
@@ -174,7 +175,26 @@ class Release:
                 )
                 continue
             self.logger.info("Upload %s to the release assets", binary_path.name)
-            self.upload_asset(binary_path)
+            self.upload_asset_with_retries(binary_path)
+
+    def upload_asset_with_retries(self, path: Path, retries: int = 5) -> None:
+        "The function retries to upload asset with progressive sleep between attempts"
+        for attempt in range(retries):
+            try:
+                self.upload_asset(path)
+                return
+            except (BaseException, Exception) as e:
+                if attempt + 1 < retries:
+                    self.logger.warning(
+                        "Uploading of %s failed with exception '%s', attempt %i",
+                        path,
+                        e,
+                        attempt + 1,
+                    )
+                    # Progressive sleep between retries
+                    sleep(sum(range(attempt + 1)) + 1)
+                    continue
+                raise
 
     def upload_asset(self, path: Path) -> None:
         # The logic that upload_asset() checks the existing on its own doesn't
@@ -190,19 +210,23 @@ class Release:
         try:
             self.gh_release.upload_asset(str(path))
         except GithubException as e:
-            if e.data["message"] == "Validation Failed" and [
+            if e.data.get("message", "") == "Validation Failed" and [  # type: ignore
                 True
-                for err in e.data["errors"]
-                if err["code"] == "already_exists"  # type: ignore
+                for err in e.data.get("errors", {})  # type: ignore
+                if err.get("code", "") == "already_exists"  # type: ignore
             ]:
                 self.logger.info(
                     "Asset %s already exists in release %s", path.name, self.version_tag
                 )
+                return
+            raise
 
-    def mark_finished(self, status: STATUS):
-        self.logger.info("Mark the release as finished")
-        finished = self.release_dir / "finished"
-        finished.touch()
+    def mark_finished(self, status: STATUS) -> None:
+        self.logger.info("Mark the release as finished with status '%s'", status)
+        # ???: The failed release shouldn't create the mark preventing restart
+        if status == SUCCESS:
+            finished = self.release_dir / "finished"
+            finished.touch()
         self.logger.info("Upload log file to S3")
         key = p.join(
             self.release_branch, self.commit.sha, "release", self._log_file.name
@@ -296,7 +320,7 @@ class Release:
         return self._packages
 
     @packages.setter
-    def packages(self, packages: Packages):
+    def packages(self, packages: Packages) -> None:
         self._packages = packages
 
     @property
