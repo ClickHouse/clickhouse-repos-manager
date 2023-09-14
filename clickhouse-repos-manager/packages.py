@@ -29,7 +29,9 @@ class Package:
     def version(self) -> str:
         return self._version
 
-    def download(self, url_prefix: str, overwrite: bool = False, logger=logger):
+    def download(
+        self, url_prefix: str, overwrite: bool = False, logger: logging.Logger = logger
+    ) -> None:
         if not overwrite and self.path.exists():
             logger.info("File %s already exists, skipping", self.path)
             return
@@ -79,7 +81,9 @@ class Packages:
                 tgz_sha = path / f"{name}-{version}-{check.deb_arch}.tgz.sha512"
                 self.tgz_sha.append(Package(check.check_name, tgz_sha, version))
 
-    def download(self, overwrite: bool, *packages, logger=logger):
+    def download(
+        self, overwrite: bool, *packages: Iterable[str], logger: logging.Logger = logger
+    ) -> None:
         if not packages:
             packages = ("deb", "rpm", "tgz")
 
