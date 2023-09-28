@@ -6,6 +6,7 @@ from logging.handlers import QueueHandler
 from queue import Queue
 from threading import Thread
 from time import sleep
+from traceback import format_exc
 from typing import Optional
 
 from flask import Flask, Response, jsonify, request, send_file
@@ -143,17 +144,17 @@ def upload_release(version_tag: str):
             version_tag, ContextHelper(), logger, request.args.getlist("binary")
         )
     except ReleaseException as e:
-        return str(e), 400
+        return format_exc(), 400
     except (BaseException, Exception) as e:
-        return str(e), 500
+        return format_exc(), 500
 
     try:
         thread = release.do(False)
     except (BaseException, Exception) as e:
         logger.error(
-            "Exception occured during the release process: %s", e.with_traceback
+            "Exception occured during the release process: %s", e
         )
-        return str(e.with_traceback), 500
+        return format_exc(), 500
 
     return Response(generate_response(thread), mimetype=mimetype, status=status)
 
