@@ -243,7 +243,7 @@ class Repos:
             self.logger.exception(
                 "Fail to prepare repositories, exception occure: %s", e
             )
-            raise RepoException from e
+            raise RepoException("Failed to create the repositories class") from e
 
     def add_packages(self) -> None:
         self.deb.add_packages(self.version_type, *self.additional_version_types)
