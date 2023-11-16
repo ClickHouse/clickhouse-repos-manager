@@ -1,10 +1,10 @@
 from collections import namedtuple
 from os import path as p
 from pathlib import Path
-from typing import Iterable, Iterator, List
+from typing import Iterable, Iterator, List, Tuple
 import logging
 
-from _vendor.download_helper import download
+from _vendor.download_helper import download, DownloadException
 
 CheckArch = namedtuple("CheckArch", ("check_name", "deb_arch", "rpm_arch"))
 
@@ -60,7 +60,7 @@ class Packages:
         "clickhouse-keeper-dbg",
         "clickhouse-server",
     )
-    optional_packages = ("clickhouse-keeper-config",)
+    optional_packages = tuple()  # type: Tuple[str, ...]
 
     def __init__(self, path: Path, url_prefix: str, version: str):
         self.url_prefix = url_prefix
@@ -121,7 +121,7 @@ class Packages:
                     try:
                         pkg.download(self.url_prefix, overwrite, logger)
                         pkgs.append(pkg)
-                    except:
+                    except DownloadException:
                         logger.warning(
                             "Failed to download optional package %s, continue",
                             pkg.name,
