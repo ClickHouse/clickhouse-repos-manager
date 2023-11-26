@@ -1,10 +1,10 @@
 from collections import namedtuple
 from os import path as p
 from pathlib import Path
-from typing import Iterator, List
+from typing import Iterable, Iterator, List, Tuple
 import logging
 
-from _vendor.download_helper import download
+from _vendor.download_helper import download, DownloadException
 
 CheckArch = namedtuple("CheckArch", ("check_name", "deb_arch", "rpm_arch"))
 
@@ -29,7 +29,9 @@ class Package:
     def version(self) -> str:
         return self._version
 
-    def download(self, url_prefix: str, overwrite: bool = False, logger=logger):
+    def download(
+        self, url_prefix: str, overwrite: bool = False, logger: logging.Logger = logger
+    ) -> None:
         if not overwrite and self.path.exists():
             logger.info("File %s already exists, skipping", self.path)
             return
@@ -58,6 +60,7 @@ class Packages:
         "clickhouse-keeper-dbg",
         "clickhouse-server",
     )
+    optional_packages = tuple()  # type: Tuple[str, ...]
 
     def __init__(self, path: Path, url_prefix: str, version: str):
         self.url_prefix = url_prefix
@@ -66,23 +69,41 @@ class Packages:
         self.rpm = []  # type: List[Package]
         self.tgz = []  # type: List[Package]
         self.tgz_sha = []  # type: List[Package]
+        self.optional_deb = []  # type: List[Package]
+        self.optional_rpm = []  # type: List[Package]
+        self.optional_tgz = []  # type: List[Package]
+        self.optional_tgz_sha = []  # type: List[Package]
         for check in self.checks:
+
+            def deb(name: str) -> Path:
+                return path / f"{name}_{version}_{check.deb_arch}.deb"
+
+            def rpm(name: str) -> Path:
+                return path / f"{name}-{version}.{check.rpm_arch}.rpm"
+
+            def tgz(name: str, with_sha: bool) -> Path:
+                sha = ".sha512" if with_sha else ""
+                return path / f"{name}-{version}-{check.deb_arch}.tgz{sha}"
+
             for name in self.packages:
-                deb = path / f"{name}_{version}_{check.deb_arch}.deb"
-                self.deb.append(Package(check.check_name, deb, version))
+                self.deb.append(Package(check.check_name, deb(name), version))
+                self.rpm.append(Package(check.check_name, rpm(name), version))
+                self.tgz.append(Package(check.check_name, tgz(name, False), version))
+                self.tgz_sha.append(Package(check.check_name, tgz(name, True), version))
 
-                rpm = path / f"{name}-{version}.{check.rpm_arch}.rpm"
-                self.rpm.append(Package(check.check_name, rpm, version))
+            for name in self.optional_packages:
+                self.optional_deb.append(Package(check.check_name, deb(name), version))
+                self.optional_rpm.append(Package(check.check_name, rpm(name), version))
+                self.optional_tgz.append(
+                    Package(check.check_name, tgz(name, False), version)
+                )
+                self.optional_tgz_sha.append(
+                    Package(check.check_name, tgz(name, True), version)
+                )
 
-                tgz = path / f"{name}-{version}-{check.deb_arch}.tgz"
-                self.tgz.append(Package(check.check_name, tgz, version))
-                tgz_sha = path / f"{name}-{version}-{check.deb_arch}.tgz.sha512"
-                self.tgz_sha.append(Package(check.check_name, tgz_sha, version))
-
-    def download(self, overwrite: bool, *packages, logger=logger):
-        if not packages:
-            packages = ("deb", "rpm", "tgz")
-
+    def download(
+        self, overwrite: bool, *packages: Iterable[str], logger: logging.Logger = logger
+    ) -> None:
         def log_download(pkg_type: str, pkgs: List[Package]) -> None:
             logger.info(
                 "Downloading %s packages:\n  %s",
@@ -90,22 +111,32 @@ class Packages:
                 "\n  ".join(p.path.name for p in pkgs),
             )
 
-        # Boilerplating to have a proper type hinting
+        def helper(pkg_type: str, pkgs: List[Package], opt_pkgs: List[Package]) -> None:
+            log_download(pkg_type, pkgs)
+            for pkg in pkgs:
+                pkg.download(self.url_prefix, overwrite, logger)
+            if opt_pkgs:
+                log_download(f"optional {pkg_type}", opt_pkgs)
+                for pkg in opt_pkgs:
+                    try:
+                        pkg.download(self.url_prefix, overwrite, logger)
+                        pkgs.append(pkg)
+                    except DownloadException:
+                        logger.warning(
+                            "Failed to download optional package %s, continue",
+                            pkg.name,
+                        )
+
+        if not packages:
+            packages = ("deb", "rpm", "tgz")
+
         if "deb" in packages:
-            log_download("deb", self.deb)
-            for package in self.deb:
-                package.download(self.url_prefix, overwrite, logger)
+            helper("deb", self.deb, self.optional_deb)
         if "rpm" in packages:
-            log_download("rpm", self.rpm)
-            for package in self.rpm:
-                package.download(self.url_prefix, overwrite, logger)
+            helper("rpm", self.rpm, self.optional_rpm)
         if "tgz" in packages:
-            log_download("tgz", self.tgz)
-            for package in self.tgz:
-                package.download(self.url_prefix, overwrite, logger)
-            log_download("tgz_sha", self.tgz_sha)
-            for package in self.tgz_sha:
-                package.download(self.url_prefix, overwrite, logger)
+            helper("tgz", self.tgz, self.optional_tgz)
+            helper("tgz_sha", self.tgz_sha, self.optional_tgz_sha)
 
     def all(self) -> Iterator[Package]:
         for packages in (self.deb, self.rpm, self.tgz, self.tgz_sha):
