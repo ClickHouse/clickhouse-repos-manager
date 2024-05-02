@@ -43,7 +43,7 @@ class Package:
         except (BaseException, Exception) as e:
             logger.error("Failed to download package %s, removing", self.name)
             self.path.unlink(True)
-            logger.error("Exception: %s", e.with_traceback)
+            logger.error("Exception: %s", e)
             raise
 
 
