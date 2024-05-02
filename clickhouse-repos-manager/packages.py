@@ -1,10 +1,10 @@
+import logging
 from collections import namedtuple
 from os import path as p
 from pathlib import Path
 from typing import Iterable, Iterator, List, Tuple
-import logging
 
-from _vendor.download_helper import download, DownloadException
+from _vendor.download_helper import DownloadException, download
 
 CheckArch = namedtuple("CheckArch", ("check_name", "deb_arch", "rpm_arch"))
 
@@ -60,7 +60,11 @@ class Packages:
         "clickhouse-keeper-dbg",
         "clickhouse-server",
     )
-    optional_packages = tuple()  # type: Tuple[str, ...]
+    # TODO: move packages to non-optional after 23.8 is removed
+    optional_packages = (
+        "clickhouse-library-bridge",
+        "clickhouse-odbc-bridge",
+    )  # type: Tuple[str, ...]
 
     def __init__(self, path: Path, url_prefix: str, version: str):
         self.url_prefix = url_prefix
