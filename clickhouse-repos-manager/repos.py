@@ -283,9 +283,10 @@ class Repos:
         if not repo_root.is_dir():
             raise RepoException(f"{repo_root} directory must exist")
         self.root = repo_root
+        self.logger = logger
+        self._remount_root()
         self.version_type = version_type
         self.additional_version_types = list(additional_version_types)
-        self.logger = logger
 
         try:
             self.deb = DebRepo(packages.deb, self.root, deb_config, self.logger)
@@ -297,6 +298,33 @@ class Repos:
                 "Fail to prepare repositories, exception occure: %s", e
             )
             raise RepoException("Failed to create the repositories class") from e
+
+    def _remount_root(self) -> None:
+        """regular remount should address accumulated inconsistency of geesefs+R2"""
+        root = self.root.absolute()
+        try:
+            runner(f"findmnt -J -s {root}", stderr=subprocess.STDOUT)
+        except subprocess.SubprocessError:
+            self.logger.info(
+                "The repositories root directory is not a mountpoint, "
+                "do not re-mount it"
+            )
+            return
+
+        mount_cmd = f"mount {root}"
+        try:
+            runner(f"mountpoint {root}", stderr=subprocess.STDOUT)
+        except subprocess.SubprocessError:
+            self.logger.info(
+                "The repositories root directory is not mounted, just mount it"
+            )
+            runner(mount_cmd, stderr=subprocess.STDOUT)
+            return
+
+        # The self.root is currently mounted, remount it
+        self.logger.info("Remounting repositories root directory")
+        runner(f"u{mount_cmd}", stderr=subprocess.STDOUT)
+        runner(mount_cmd, stderr=subprocess.STDOUT)
 
     def add_packages(self) -> None:
         self.deb.add_packages(self.version_type, *self.additional_version_types)
