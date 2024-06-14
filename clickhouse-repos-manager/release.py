@@ -1,11 +1,11 @@
 #!/usr/bin/env python
+import logging
 from os import path as p
 from pathlib import Path
 from queue import Queue
 from threading import Thread
 from time import sleep
-from typing import Final, List, Optional, Literal
-import logging
+from typing import Final, List, Literal, Optional
 
 from github.Commit import Commit
 from github.GithubException import GithubException, UnknownObjectException
@@ -14,12 +14,11 @@ from github.GitReleaseAsset import GitReleaseAsset
 from github.GitTag import GitTag
 
 from _vendor.ci_config import CI_CONFIG
-from _vendor.download_helper import download, DownloadException
+from _vendor.download_helper import DownloadException, download
 from _vendor.github_helper import check_tag
+from context_helper import ContextHelper, get_releases_dir
 from packages import Packages
 from repos import Repos
-from context_helper import ContextHelper, get_releases_dir
-
 
 logger = logging.getLogger(__name__)
 
@@ -210,10 +209,10 @@ class Release:
         try:
             self.gh_release.upload_asset(str(path))
         except GithubException as e:
-            if e.data.get("message", "") == "Validation Failed" and [  # type: ignore
+            if e.data.get("message", "") == "Validation Failed" and [
                 True
-                for err in e.data.get("errors", {})  # type: ignore
-                if err.get("code", "") == "already_exists"  # type: ignore
+                for err in e.data.get("errors", {})
+                if err.get("code", "") == "already_exists"
             ]:
                 self.logger.info(
                     "Asset %s already exists in release %s", path.name, self.version_tag
@@ -238,9 +237,8 @@ class Release:
             key,
             ExtraArgs=metadata,
         )
-        if status == SUCCESS:
-            description = "Release artifacts successfully deployed"
-        elif status == FAILURE:
+        description = "Release artifacts successfully deployed"
+        if status == FAILURE:
             description = "Failed to deploy release artifacts"
         log_url = p.join(self.ch.s3_test_reports_url, key)
         self.commit.create_status(
