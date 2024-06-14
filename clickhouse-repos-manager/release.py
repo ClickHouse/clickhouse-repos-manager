@@ -221,7 +221,9 @@ class Release:
             raise
 
     def mark_finished(self, status: STATUS) -> None:
-        self.logger.info("Mark the release as finished with status '%s'", status)
+        # The workflow to deploy packages is looking for the next line in the output
+        # See ClickHouse/ClickHouse/.github/workflows/release.yml
+        self.logger.info("Mark the release as finished with status `%s`", status)
         # ???: The failed release shouldn't create the mark preventing restart
         if status == SUCCESS:
             finished = self.release_dir / "finished"
