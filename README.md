@@ -14,7 +14,7 @@ For the repository management the next binaries are used (ubuntu 22.04):
 To mount the CloudFlare R2 storage, we use [geesefs](https://github.com/yandex-cloud/geesefs/releases). Here's the `/etc/fstab` mount description:
 
 ```fstab
-packages /home/ubuntu/r2 fuse.geesefs _netdev,user_id=1000,group_id=1000,--cheap,--file-mode=0666,--dir-mode=0777,--endpoint=https://account_id.r2.cloudflarestorage.com,--shared-config=/home/ubuntu/.r2_auth,--memory-limit=2050,--gc-interval=100,--max-flushers=2,--max-parallel-parts=3,--max-parallel-copy=2 0 0
+packages /home/ubuntu/r2 fuse.geesefs _netdev,user_id=1000,group_id=1000,--uid=1000,--gid=1000,--cheap,--file-mode=0666,--dir-mode=0777,--endpoint=https://account_id.r2.cloudflarestorage.com,--shared-config=/home/ubuntu/.r2_auth,--memory-limit=2050,--gc-interval=100,--max-flushers=5,--max-parallel-parts=3,--max-parallel-copy=2 0 0
 ```
 
 The `geesefs` binary should be in the `$PATH`, `--shared-config` has the AWS credentials format
@@ -45,3 +45,56 @@ All the configuration environment parameters are listed in `clickhouse-repos-man
 
 #### Debian repository configuration
 The ENV parameters starting with `DEB_REPO_` are converted from `DEB_REPO_PARAMETER_NAME` to `ParameterName` and used in reprepro.
+
+# Troubleshooting
+
+### The host
+The host is available for developers in `tailscale`. To find it, execute `tailscale status | grep packages`
+
+```
+PACKAGES_HOST=$(tailscale status | grep '[-a-z]*packages[-a-z0-9]*' -o)
+ssh "ubuntu@$PACKAGES_HOST"
+```
+
+## Remount R2 directory
+
+```
+umount "$HOME/r2"
+mount "$HOME/r2"
+```
+
+## Reprepro commands
+
+!! When ever you have inconsistency in the repositories, it's required to remount the R2.
+
+### Regenerate index
+
+If the index has some inconsistency, like in https://github.com/ClickHouse/ClickHouse/issues/65229, the following command will help **after** the [remount](#remount-r2-directory).
+
+```
+### !! First remount !! ###
+# Preserve the evidences
+mkdir -p "$HOME/r2/configs/issues"
+tar cf "$HOME/r2/configs/issues/deb-issue-$(date +%FT%T)".tar.gz -C "$HOME/r2/" deb/dists configs/deb
+# Regenerate the index
+reprepro --basedir ~/r2/configs/deb --verbose --export=force --outdir ~/r2/deb --keepdirectories --keepunreferencedfiles export
+```
+
+### Search and remove corrupted packages
+
+When a release is failed to deploy on the `reprepro` stage, it could corrupt the DB. Although it's addressed by ca36431c8072ec438d3539962b5e40cc734c434a, here's are the commands used to help:
+
+```
+### !! First remount !! ###
+# Search the packages with exact version
+CODENAME=stable  # could be `lts` as well
+reprepro --basedir ~/r2/configs/deb --verbose --export=force --outdir ~/r2/deb --keepdirectories --keepunreferencedfiles listfilter "$CODENAME" '$Version (==24.2.3.70)'
+# If it's correct, then removefilter
+reprepro --basedir ~/r2/configs/deb --verbose --export=force --outdir ~/r2/deb --keepdirectories --keepunreferencedfiles removefilter "$CODENAME" '$Version (==24.2.3.70)'
+# Show which packages should be deleted from the pool
+reprepro --basedir ~/r2/configs/deb --verbose --export=force --outdir ~/r2/deb --keepdirectories --keepunreferencedfiles dumpunreferenced
+# And, if everything is correct, drop them
+reprepro --basedir ~/r2/configs/deb --verbose --export=force --outdir ~/r2/deb --keepdirectories deleteunreferenced
+```
+
+A usual way to go will be restart the workflow/job to delivery the packages
