@@ -77,6 +77,8 @@ class DebRepo:
             )
             for additional_version_type in additional_version_types:
                 self.process_additional_packages(version_type, additional_version_type)
+            self.logger.info("Sleep for a while to get things synced")
+            runner("sync ; sleep 10")
             command = f"{self.reprepro_cmd} export"
             self.logger.info(
                 "Export indicies logs:\n%s", runner(command, stderr=subprocess.STDOUT)
