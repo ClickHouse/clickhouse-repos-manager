@@ -7,7 +7,7 @@ from logging import Logger, getLogger
 from pathlib import Path
 from shutil import copy2, copytree, rmtree
 from tempfile import mkdtemp
-from typing import Dict, Iterator, List
+from typing import Any, Dict, Iterator, List
 
 from jinja2 import Template
 
@@ -73,7 +73,7 @@ class DebRepo:
             command = f"{self.reprepro_cmd} includedeb '{version_type}' {deb_files}"
             self.logger.info("Deploying DEB packages to codename %s", version_type)
             self.logger.info(
-                "Deployment logs:\n%s", runner(command, stderr=subprocess.STDOUT)
+                "Deployment logs:\n%s", self.run(command, stderr=subprocess.STDOUT)
             )
             for additional_version_type in additional_version_types:
                 self.process_additional_packages(version_type, additional_version_type)
@@ -96,13 +96,13 @@ class DebRepo:
             "Deploying DEB packages to additional codename %s", additional_version_type
         )
         self.logger.info(
-            "Deployment logs:\n%s", runner(command, stderr=subprocess.STDOUT)
+            "Deployment logs:\n%s", self.run(command, stderr=subprocess.STDOUT)
         )
         self.logger.info("Sleep for a while to get things synced")
-        runner("sync ; sleep 10")
+        self.run("sync ; sleep 10")
         command = f"{self.reprepro_cmd} export"
         self.logger.info(
-            "Export indicies logs:\n%s", runner(command, stderr=subprocess.STDOUT)
+            "Export indicies logs:\n%s", self.run(command, stderr=subprocess.STDOUT)
         )
 
     def check_dirs(self) -> None:
@@ -176,6 +176,10 @@ class DebRepo:
             f"--outdir '{self.outdir_path}'"
         )
 
+    def run(self, *args: Any, **kwargs: Any) -> str:
+        self.logger.info("Running the command:  \n%s", args[0])
+        return runner(*args, **kwargs)
+
 
 class RpmRepo:
     # Check requirements
@@ -217,13 +221,13 @@ class RpmRepo:
             self.logger.info(
                 "Output for command %s:\n%s",
                 command.split(maxsplit=1)[0],
-                runner(command, stderr=subprocess.STDOUT),
+                self.run(command, stderr=subprocess.STDOUT),
             )
 
         update_public_key = f"gpg --armor --export {self.signing_key}"
         pub_key_path = dest_dir / "repodata" / "repomd.xml.key"
         self.logger.info("Updating repomd.xml.key")
-        pub_key_path.write_text(runner(update_public_key))
+        pub_key_path.write_text(self.run(update_public_key))
 
         for additional_version_type in additional_version_types:
             self.add_packages(additional_version_type)
@@ -231,6 +235,10 @@ class RpmRepo:
     @property
     def outdir_path(self) -> Path:
         return self._repo_root / "rpm"
+
+    def run(self, *args: Any, **kwargs: Any) -> str:
+        self.logger.info("Running the command:  \n%s", args[0])
+        return runner(*args, **kwargs)
 
 
 class TgzRepo:
