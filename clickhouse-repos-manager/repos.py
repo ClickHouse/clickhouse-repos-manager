@@ -1,17 +1,20 @@
 #!/usr/bin/env python
-from logging import getLogger, Logger
-from pathlib import Path
-from shutil import copy2
-from typing import Dict, List, Union
-
 import subprocess
+import tarfile
+from contextlib import contextmanager
+from datetime import datetime
+from logging import Logger, getLogger
+from pathlib import Path
+from shutil import copy2, copytree, rmtree
+from tempfile import mkdtemp
+from typing import Any, Dict, Iterator, List
 
 from jinja2 import Template
 
 from _vendor.shell_runner import Runner
 from app_config import DEB_REPO_TEMPLATE
 from context_helper import DebParam
-from packages import Packages, Package
+from packages import Package, Packages
 
 runner = Runner()
 
@@ -25,7 +28,7 @@ def check_dir_exist_or_create(path: Path) -> None:
         raise RepoException(f"the file {path} must be a directory")
 
 
-def copy_if_not_exists(src: Path, dst: Path) -> Union[Path, str]:
+def copy_if_not_exists(src: Path, dst: Path) -> Path:
     if dst.is_dir():
         dst = dst / src.name
     if not dst.exists():
@@ -43,6 +46,7 @@ class DebRepo:
     # Check requirements
     runner("reprepro --version", stderr=subprocess.STDOUT)
     _reprepro_config = Path("configs") / "deb"
+    _configs_archive = Path("configs") / "archive"
     dists_config = _reprepro_config / "conf" / "distributions"
 
     def __init__(
@@ -59,18 +63,20 @@ class DebRepo:
         self.packages = packages
         self._repo_config = repo_config
         self._repo_root = repo_root
+        self._configs_root = repo_root
         self.logger = logger
         self.check_dirs()
 
     def add_packages(self, version_type: str, *additional_version_types: str) -> None:
-        deb_files = " ".join(pkg.path.as_posix() for pkg in self.packages)
-        command = f"{self.reprepro_cmd} includedeb '{version_type}' {deb_files}"
-        self.logger.info("Deploying DEB packages to codename %s", version_type)
-        self.logger.info(
-            "Deployment logs:\n%s", runner(command, stderr=subprocess.STDOUT)
-        )
-        for additional_version_type in additional_version_types:
-            self.process_additional_packages(version_type, additional_version_type)
+        with self.local_configs():
+            deb_files = " ".join(pkg.path.as_posix() for pkg in self.packages)
+            command = f"{self.reprepro_cmd} includedeb '{version_type}' {deb_files}"
+            self.logger.info("Deploying DEB packages to codename %s", version_type)
+            self.logger.info(
+                "Deployment logs:\n%s", self.run(command, stderr=subprocess.STDOUT)
+            )
+            for additional_version_type in additional_version_types:
+                self.process_additional_packages(version_type, additional_version_type)
 
     def process_additional_packages(
         self, original_version_type: str, additional_version_type: str
@@ -90,7 +96,13 @@ class DebRepo:
             "Deploying DEB packages to additional codename %s", additional_version_type
         )
         self.logger.info(
-            "Deployment logs:\n%s", runner(command, stderr=subprocess.STDOUT)
+            "Deployment logs:\n%s", self.run(command, stderr=subprocess.STDOUT)
+        )
+        self.logger.info("Sleep for a while to get things synced")
+        self.run("sync ; sleep 10")
+        command = f"{self.reprepro_cmd} export"
+        self.logger.info(
+            "Export indicies logs:\n%s", self.run(command, stderr=subprocess.STDOUT)
         )
 
     def check_dirs(self) -> None:
@@ -102,13 +114,60 @@ class DebRepo:
 
         check_dir_exist_or_create(self.outdir_path)
 
+    @contextmanager
+    def local_configs(self) -> Iterator[None]:
+        temp_dir = Path(mkdtemp())
+
+        preserved_configs_root = self._configs_root
+        original_configs = self.reprepro_config
+        self._configs_root = temp_dir
+        configs_copy = self.reprepro_config
+        check_dir_exist_or_create(configs_copy.parent)
+
+        self.logger.info(
+            "Copy content of %s to %s for local indexing",
+            original_configs,
+            configs_copy,
+        )
+        copytree(original_configs, configs_copy)
+
+        try:
+            # copy configs
+            yield
+        except (Exception, BaseException) as e:
+            # by any issue, restore the copied
+            self.logger.error(
+                "Error occured during the packages deployment, "
+                "do not copy changed configs back: %s",
+                e,
+            )
+            self._configs_root = preserved_configs_root
+            rmtree(temp_dir)
+            raise
+        # Create an archive from previous configs' state
+        now = datetime.now()
+        archive_dir = self._repo_root / self._configs_archive
+        check_dir_exist_or_create(archive_dir)
+        with tarfile.open(archive_dir / f"deb-{now.isoformat()}.tar.gz", "w:gz") as tf:
+            tf.add(original_configs, arcname="deb")
+        config_archives = list(archive_dir.glob("deb-*.tar.gz"))
+        # archive existing as backup, preserve last 30
+        if len(config_archives) >= 30:
+            for archive in config_archives[: len(config_archives) - 29]:
+                archive.unlink()
+        # copying updated back as the current DB
+        rmtree(original_configs)
+        copytree(configs_copy, original_configs)
+        self._configs_root = preserved_configs_root
+        rmtree(temp_dir)
+
     @property
     def outdir_path(self) -> Path:
         return self._repo_root / "deb"
 
     @property
     def reprepro_config(self) -> Path:
-        return self._repo_root / DebRepo._reprepro_config
+        return self._configs_root / DebRepo._reprepro_config
 
     @property
     def reprepro_cmd(self) -> str:
@@ -116,6 +175,10 @@ class DebRepo:
             f"reprepro --basedir '{self.reprepro_config}' --verbose --export=force "
             f"--outdir '{self.outdir_path}'"
         )
+
+    def run(self, *args: Any, **kwargs: Any) -> str:
+        self.logger.info("Running the command:  \n%s", args[0])
+        return runner(*args, **kwargs)
 
 
 class RpmRepo:
@@ -158,13 +221,13 @@ class RpmRepo:
             self.logger.info(
                 "Output for command %s:\n%s",
                 command.split(maxsplit=1)[0],
-                runner(command, stderr=subprocess.STDOUT),
+                self.run(command, stderr=subprocess.STDOUT),
             )
 
         update_public_key = f"gpg --armor --export {self.signing_key}"
         pub_key_path = dest_dir / "repodata" / "repomd.xml.key"
         self.logger.info("Updating repomd.xml.key")
-        pub_key_path.write_text(runner(update_public_key))
+        pub_key_path.write_text(self.run(update_public_key))
 
         for additional_version_type in additional_version_types:
             self.add_packages(additional_version_type)
@@ -172,6 +235,10 @@ class RpmRepo:
     @property
     def outdir_path(self) -> Path:
         return self._repo_root / "rpm"
+
+    def run(self, *args: Any, **kwargs: Any) -> str:
+        self.logger.info("Running the command:  \n%s", args[0])
+        return runner(*args, **kwargs)
 
 
 class TgzRepo:
@@ -230,9 +297,10 @@ class Repos:
         if not repo_root.is_dir():
             raise RepoException(f"{repo_root} directory must exist")
         self.root = repo_root
+        self.logger = logger
+        self._remount_root()
         self.version_type = version_type
         self.additional_version_types = list(additional_version_types)
-        self.logger = logger
 
         try:
             self.deb = DebRepo(packages.deb, self.root, deb_config, self.logger)
@@ -244,6 +312,33 @@ class Repos:
                 "Fail to prepare repositories, exception occure: %s", e
             )
             raise RepoException("Failed to create the repositories class") from e
+
+    def _remount_root(self) -> None:
+        """regular remount should address accumulated inconsistency of geesefs+R2"""
+        root = self.root.absolute()
+        try:
+            runner(f"findmnt -J -s {root}", stderr=subprocess.STDOUT)
+        except subprocess.SubprocessError:
+            self.logger.info(
+                "The repositories root directory is not a mountpoint, "
+                "do not re-mount it"
+            )
+            return
+
+        mount_cmd = f"mount {root}"
+        try:
+            runner(f"mountpoint {root}", stderr=subprocess.STDOUT)
+        except subprocess.SubprocessError:
+            self.logger.info(
+                "The repositories root directory is not mounted, just mount it"
+            )
+            runner(mount_cmd, stderr=subprocess.STDOUT)
+            return
+
+        # The self.root is currently mounted, remount it
+        self.logger.info("Remounting repositories root directory")
+        runner(f"u{mount_cmd}", stderr=subprocess.STDOUT)
+        runner(mount_cmd, stderr=subprocess.STDOUT)
 
     def add_packages(self) -> None:
         self.deb.add_packages(self.version_type, *self.additional_version_types)

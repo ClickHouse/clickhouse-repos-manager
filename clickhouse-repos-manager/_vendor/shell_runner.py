@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-from typing import Any, Optional
 import logging
 import os.path as p
 import subprocess
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -37,5 +37,5 @@ class Runner:
             return
         self._cwd = value
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args: Any, **kwargs: Any) -> str:
         return self.run(*args, **kwargs)
