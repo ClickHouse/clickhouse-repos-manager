@@ -38,19 +38,38 @@ subkey or to the primary key.
 ## Development
 
 ```sh
-make test    # unit tests; bucket and mock key tests skip without their variables
-make dist    # static binaries for linux/amd64, linux/arm64, darwin/arm64 and SHA256SUMS
+make test        # unit tests; bucket and mock key tests skip without their variables
+make test-local  # all tests, bucket tests against a fresh Miniflare container
+make test-remote # all tests, bucket tests against a real bucket
+make dist        # static binaries for linux/amd64, linux/arm64, darwin/arm64 and SHA256SUMS
 ```
 
-Bucket integration tests run against a test bucket, each under a random
-prefix that is removed afterwards:
+`make test-local` needs Docker. It builds `test/miniflare/` (a local R2
+simulator with the S3 API), starts it on a random local port with an empty
+in-memory bucket, runs the tests and removes the container. Pass `go test`
+arguments with `ARGS`, for example
+`make test-local ARGS='-run TestPutIfMatch ./internal/store'`.
+
+`make test-remote` runs the same tests against a real bucket, `packages-dev`
+unless `CH_DEPLOY_TEST_BUCKET` says otherwise:
 
 ```sh
 CH_DEPLOY_TEST_ENDPOINT=https://<account>.r2.cloudflarestorage.com \
-CH_DEPLOY_TEST_BUCKET=<test bucket> \
 AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
-go test ./internal/store/
+make test-remote
 ```
+
+All test data lives below `ch-deploy-test/`. A run uses the prefix
+`ch-deploy-test/<UTC time>-<random>/`, and every test a prefix of its own
+inside it, deleted when the test ends. After `go test` exits, even on a
+panic or Ctrl+C, the script deletes the run prefix and any run prefix older
+than 24 hours. The same cleanup works by hand:
+`go run ./test/cleanup [-stale 24h] [prefix...]`. It refuses prefixes outside
+`ch-deploy-test/`.
+
+Tests use `internal/storetest`: `storetest.New(t)` returns an isolated store
+and skips the test when `CH_DEPLOY_TEST_ENDPOINT` or `CH_DEPLOY_TEST_BUCKET`
+is unset.
 
 A key exported by gpg can be checked with
 `CH_DEPLOY_TEST_SIGNING_KEY_FILE` (base64 secret export) and

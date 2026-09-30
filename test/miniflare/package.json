@@ -1,0 +1,8 @@
+{
+  "name": "ch-deploy-miniflare",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "miniflare": "5.20260926.1-alpha"
+  }
+}

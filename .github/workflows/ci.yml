@@ -24,8 +24,8 @@ jobs:
         run: sudo apt-get install -y --no-install-recommends gpgv
       - run: make check-fmt
       - run: make vet
-      # Bucket tests skip without CH_DEPLOY_TEST_* variables.
-      - run: go test -race ./...
+      # Bucket tests run against Miniflare in Docker.
+      - run: make test-local
 
   build:
     runs-on: ubuntu-latest

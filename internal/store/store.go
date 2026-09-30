@@ -44,6 +44,9 @@ var (
 // MetaSHA256 is the custom metadata key holding the hex SHA256 of the object content.
 const MetaSHA256 = "sha256"
 
+// TestPrefix is the only key prefix where Config.DeleteAnyKey is accepted.
+const TestPrefix = "ch-deploy-test/"
+
 // Config holds the connection parameters.
 type Config struct {
 	Endpoint        string
@@ -53,6 +56,8 @@ type Config struct {
 	SecretAccessKey string
 	// Deletable lists key prefixes (relative to Prefix) where Delete is allowed.
 	Deletable []string
+	// DeleteAnyKey allows Delete of every key under Prefix, which must be below TestPrefix.
+	DeleteAnyKey bool
 }
 
 // Object describes a stored object.
@@ -95,6 +100,12 @@ func New(cfg Config) (*Store, error) {
 			return nil, errors.New("an empty deletable prefix would allow deleting everything")
 		}
 		deletable = append(deletable, d)
+	}
+	if cfg.DeleteAnyKey {
+		if !strings.HasPrefix(prefix, TestPrefix) || prefix == TestPrefix || strings.Contains(prefix, "..") {
+			return nil, fmt.Errorf("delete any key is allowed only below %s, not under prefix %q", TestPrefix, prefix)
+		}
+		deletable = []string{""}
 	}
 
 	client := s3.New(s3.Options{
