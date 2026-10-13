@@ -37,6 +37,7 @@ cd "$root"
 [ $# -gt 0 ] || set -- -race ./...
 CH_DEPLOY_TEST_ENDPOINT="http://127.0.0.1:$port/cdn-cgi/local/r2/s3" \
 	CH_DEPLOY_TEST_BUCKET="$bucket" \
+	CH_DEPLOY_TEST_BACKEND=miniflare \
 	AWS_ACCESS_KEY_ID="$access_key" \
 	AWS_SECRET_ACCESS_KEY="$secret_key" \
 	go test "$@"

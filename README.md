@@ -69,7 +69,12 @@ than 24 hours. The same cleanup works by hand:
 
 Tests use `internal/storetest`: `storetest.New(t)` returns an isolated store
 and skips the test when `CH_DEPLOY_TEST_ENDPOINT` or `CH_DEPLOY_TEST_BUCKET`
-is unset.
+is unset. `test/miniflare/run.sh` sets `CH_DEPLOY_TEST_BACKEND=miniflare`, and
+`storetest.SkipOnMiniflare` skips tests of R2 behaviour that Miniflare does
+not reproduce. `storetest.Faults` wraps a store and fails one mutating call:
+before it is sent, after it was applied (the response is lost), or by sending
+it twice as an SDK retry does; `storetest.ForEachFault` runs a scenario once
+per call and mode.
 
 A key exported by gpg can be checked with
 `CH_DEPLOY_TEST_SIGNING_KEY_FILE` (base64 secret export) and

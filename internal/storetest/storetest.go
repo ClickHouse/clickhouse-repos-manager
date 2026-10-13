@@ -44,17 +44,34 @@ func FromEnv() (Env, bool) {
 	return e, e.Endpoint != "" && e.Bucket != ""
 }
 
-// Store opens the bucket under prefix.
-func (e Env) Store(prefix string, deleteAnyKey bool, deletable ...string) (*store.Store, error) {
-	return store.New(store.Config{
+// Config is the store configuration for prefix.
+func (e Env) Config(prefix string) store.Config {
+	return store.Config{
 		Endpoint:        e.Endpoint,
 		Bucket:          e.Bucket,
 		Prefix:          prefix,
 		AccessKeyID:     e.AccessKeyID,
 		SecretAccessKey: e.SecretAccessKey,
-		Deletable:       deletable,
-		DeleteAnyKey:    deleteAnyKey,
-	})
+	}
+}
+
+// Store opens the bucket under prefix.
+func (e Env) Store(prefix string, deleteAnyKey bool, deletable ...string) (*store.Store, error) {
+	cfg := e.Config(prefix)
+	cfg.Deletable = deletable
+	cfg.DeleteAnyKey = deleteAnyKey
+	return store.New(cfg)
+}
+
+// Backend is CH_DEPLOY_TEST_BACKEND: "miniflare" under test/miniflare/run.sh, empty for real R2.
+func Backend() string { return os.Getenv("CH_DEPLOY_TEST_BACKEND") }
+
+// SkipOnMiniflare skips a test of R2 behaviour that Miniflare does not reproduce.
+func SkipOnMiniflare(t testing.TB, reason string) {
+	t.Helper()
+	if Backend() == "miniflare" {
+		t.Skip("Miniflare: " + reason)
+	}
 }
 
 // NewRunPrefix returns a fresh run prefix, for example
@@ -97,6 +114,13 @@ var unsafeName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 // Delete works only under deletable, as in production.
 func New(t testing.TB, deletable ...string) *store.Store {
 	t.Helper()
+	return NewConfig(t, func(c *store.Config) { c.Deletable = deletable })
+}
+
+// NewConfig is New with the store configuration adjusted by edit.
+// Prefix and credentials are set before edit runs and must stay.
+func NewConfig(t testing.TB, edit func(*store.Config)) *store.Store {
+	t.Helper()
 	env, ok := FromEnv()
 	if !ok {
 		t.Skip("CH_DEPLOY_TEST_ENDPOINT and CH_DEPLOY_TEST_BUCKET are not set")
@@ -106,7 +130,12 @@ func New(t testing.TB, deletable ...string) *store.Store {
 		t.Fatal(err)
 	}
 	prefix := run + "/" + unsafeName.ReplaceAllString(t.Name(), "_") + "-" + randomHex(4)
-	s, err := env.Store(prefix, false, deletable...)
+	cfg := env.Config(prefix)
+	edit(&cfg)
+	if cfg.Prefix != prefix || cfg.DeleteAnyKey {
+		t.Fatal("NewConfig: prefix and DeleteAnyKey are fixed")
+	}
+	s, err := store.New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

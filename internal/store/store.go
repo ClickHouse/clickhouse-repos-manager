@@ -8,9 +8,6 @@ package store
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +25,8 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/aws/smithy-go/middleware"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
+
+	"github.com/ClickHouse/clickhouse-repos-manager/internal/hashes"
 )
 
 var (
@@ -39,10 +38,27 @@ var (
 	// and only its response was lost, so callers must read the object and compare
 	// before treating it as a conflict.
 	ErrPrecondition = errors.New("precondition failed")
+	// ErrHashMismatch means an object carries the expected release stamp but other content.
+	ErrHashMismatch = errors.New("hash mismatch")
 )
 
-// MetaSHA256 is the custom metadata key holding the hex SHA256 of the object content.
-const MetaSHA256 = "sha256"
+// Custom metadata keys (x-amz-meta-*).
+const (
+	// MetaSHA256 holds the hex SHA256 of the object content.
+	MetaSHA256 = "sha256"
+	// MetaSHA512 holds the hex SHA512 of the object content, set for TGZ files.
+	MetaSHA512 = "sha512"
+	// MetaRelease is the stamp: the tag of the release that created the object.
+	MetaRelease = "release"
+)
+
+// Multipart upload limits.
+const (
+	DefaultPartSize          = 64 << 20
+	MinPartSize              = 5 << 20
+	MaxParts                 = 10000
+	DefaultUploadConcurrency = 4
+)
 
 // TestPrefix is the only key prefix where Config.DeleteAnyKey is accepted.
 const TestPrefix = "ch-deploy-test/"
@@ -58,6 +74,10 @@ type Config struct {
 	Deletable []string
 	// DeleteAnyKey allows Delete of every key under Prefix, which must be below TestPrefix.
 	DeleteAnyKey bool
+	// PartSize is the multipart part size; files up to it go in one PUT. Default DefaultPartSize.
+	PartSize int64
+	// UploadConcurrency is the number of parts uploaded in parallel. Default DefaultUploadConcurrency.
+	UploadConcurrency int
 }
 
 // Object describes a stored object.
@@ -66,22 +86,80 @@ type Object struct {
 	Size         int64
 	ETag         string
 	SHA256       string // hex, from MetaSHA256; empty for objects not written by this tool
+	SHA512       string // hex, from MetaSHA512
+	Release      string // the stamp, from MetaRelease
 	ContentType  string
 	CacheControl string
 }
 
-// PutOptions are the HTTP headers stored with an object.
+// PutOptions are the HTTP headers and metadata stored with an object.
 type PutOptions struct {
 	ContentType  string
 	CacheControl string
+	// Release is the stamp; empty for private state.
+	Release string
+	// SHA512 is stored as MetaSHA512 when set.
+	SHA512 string
+}
+
+func (o PutOptions) metadata(sha256 string) map[string]string {
+	m := map[string]string{MetaSHA256: sha256}
+	if o.Release != "" {
+		m[MetaRelease] = o.Release
+	}
+	if o.SHA512 != "" {
+		m[MetaSHA512] = o.SHA512
+	}
+	return m
+}
+
+func (o PutOptions) object(key string, size int64, etag, sha256 string) Object {
+	return Object{
+		Key:          key,
+		Size:         size,
+		ETag:         etag,
+		SHA256:       sha256,
+		SHA512:       o.SHA512,
+		Release:      o.Release,
+		ContentType:  o.ContentType,
+		CacheControl: o.CacheControl,
+	}
+}
+
+// DeleteResult is the outcome of DeleteOwned.
+type DeleteResult int
+
+const (
+	// Deleted means the object carried the stamp and hash and is gone now.
+	Deleted DeleteResult = iota + 1
+	// Absent means there was no object.
+	Absent
+	// NotOwned means the object carries no stamp or another one, and stays.
+	NotOwned
+)
+
+func (r DeleteResult) String() string {
+	switch r {
+	case Deleted:
+		return "deleted"
+	case Absent:
+		return "absent"
+	case NotOwned:
+		return "not owned"
+	}
+	return fmt.Sprintf("DeleteResult(%d)", int(r))
 }
 
 // Store is a bucket, optionally narrowed to a key prefix.
 type Store struct {
-	client    *s3.Client
-	bucket    string
-	prefix    string
-	deletable []string
+	client            *s3.Client
+	bucket            string
+	prefix            string
+	deletable         []string
+	partSize          int64
+	uploadConcurrency int
+	// afterPart, set only by tests, runs after each uploaded part and can fail the upload.
+	afterPart func(part int32) error
 }
 
 // New creates a Store. Credentials come only from cfg; shared AWS config files are never read.
@@ -107,6 +185,20 @@ func New(cfg Config) (*Store, error) {
 		}
 		deletable = []string{""}
 	}
+	partSize := cfg.PartSize
+	if partSize == 0 {
+		partSize = DefaultPartSize
+	}
+	if partSize < MinPartSize {
+		return nil, fmt.Errorf("part size %d is below the minimum %d", partSize, MinPartSize)
+	}
+	concurrency := cfg.UploadConcurrency
+	if concurrency == 0 {
+		concurrency = DefaultUploadConcurrency
+	}
+	if concurrency < 1 {
+		return nil, fmt.Errorf("upload concurrency %d is below 1", concurrency)
+	}
 
 	client := s3.New(s3.Options{
 		Region:       "auto",
@@ -127,7 +219,7 @@ func New(cfg Config) (*Store, error) {
 			o.Retryables = append(o.Retryables, retry.RetryableErrorCode{Codes: map[string]struct{}{"ServiceUnavailable": {}}})
 		}),
 	})
-	return &Store{client: client, bucket: cfg.Bucket, prefix: prefix, deletable: deletable}, nil
+	return &Store{client: client, bucket: cfg.Bucket, prefix: prefix, deletable: deletable, partSize: partSize, uploadConcurrency: concurrency}, nil
 }
 
 // Ping checks that the bucket is reachable with the configured credentials.
@@ -150,18 +242,20 @@ func (s *Store) Get(ctx context.Context, key string) ([]byte, Object, error) {
 	if err != nil {
 		return nil, Object{}, fmt.Errorf("get %s: %w", key, err)
 	}
-	obj := Object{
-		Key:          key,
-		Size:         aws.ToInt64(out.ContentLength),
-		ETag:         aws.ToString(out.ETag),
-		SHA256:       out.Metadata[MetaSHA256],
-		ContentType:  aws.ToString(out.ContentType),
-		CacheControl: aws.ToString(out.CacheControl),
-	}
+	obj := object(key, out.ContentLength, out.ETag, out.Metadata, out.ContentType, out.CacheControl)
 	if obj.Size != int64(len(body)) {
 		return nil, Object{}, fmt.Errorf("get %s: read %d bytes, expected %d", key, len(body), obj.Size)
 	}
 	return body, obj, nil
+}
+
+// Open streams an object. The caller closes the body and checks the length it read.
+func (s *Store) Open(ctx context.Context, key string) (io.ReadCloser, Object, error) {
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &s.bucket, Key: s.full(key)})
+	if err != nil {
+		return nil, Object{}, s.wrap("get", key, err)
+	}
+	return out.Body, object(key, out.ContentLength, out.ETag, out.Metadata, out.ContentType, out.CacheControl), nil
 }
 
 // Head returns the attributes of an object.
@@ -170,14 +264,20 @@ func (s *Store) Head(ctx context.Context, key string) (Object, error) {
 	if err != nil {
 		return Object{}, s.wrap("head", key, err)
 	}
+	return object(key, out.ContentLength, out.ETag, out.Metadata, out.ContentType, out.CacheControl), nil
+}
+
+func object(key string, size *int64, etag *string, meta map[string]string, contentType, cacheControl *string) Object {
 	return Object{
 		Key:          key,
-		Size:         aws.ToInt64(out.ContentLength),
-		ETag:         aws.ToString(out.ETag),
-		SHA256:       out.Metadata[MetaSHA256],
-		ContentType:  aws.ToString(out.ContentType),
-		CacheControl: aws.ToString(out.CacheControl),
-	}, nil
+		Size:         aws.ToInt64(size),
+		ETag:         aws.ToString(etag),
+		SHA256:       meta[MetaSHA256],
+		SHA512:       meta[MetaSHA512],
+		Release:      meta[MetaRelease],
+		ContentType:  aws.ToString(contentType),
+		CacheControl: aws.ToString(cacheControl),
+	}
 }
 
 // PutIfAbsent creates an object, failing with ErrPrecondition if the key exists.
@@ -186,6 +286,7 @@ func (s *Store) PutIfAbsent(ctx context.Context, key string, body []byte, opts P
 }
 
 // PutIfMatch replaces an object only if its ETag is still etag, failing with ErrPrecondition otherwise.
+// A missing key is ErrPrecondition too (R2 and Miniflare), not ErrNotFound.
 func (s *Store) PutIfMatch(ctx context.Context, key, etag string, body []byte, opts PutOptions) (Object, error) {
 	if etag == "" {
 		return Object{}, errors.New("put if match: empty etag")
@@ -199,14 +300,23 @@ func (s *Store) Put(ctx context.Context, key string, body []byte, opts PutOption
 }
 
 func (s *Store) put(ctx context.Context, key string, body []byte, opts PutOptions, cond func(*s3.PutObjectInput)) (Object, error) {
-	sum := sha256.Sum256(body)
+	return s.putObject(ctx, key, bytes.NewReader(body), hashes.Bytes(body), opts, cond)
+}
+
+// putObject sends one PutObject with a SHA256 checksum, which R2 verifies.
+// R2 rejects Content-MD5 next to it, so Miniflare, which checks only MD5, verifies nothing here.
+func (s *Store) putObject(ctx context.Context, key string, body io.ReadSeeker, sums hashes.Sums, opts PutOptions, cond func(*s3.PutObjectInput)) (Object, error) {
+	sha256, err := hashes.Base64(sums.SHA256)
+	if err != nil {
+		return Object{}, fmt.Errorf("put %s: %w", key, err)
+	}
 	in := &s3.PutObjectInput{
 		Bucket:         &s.bucket,
 		Key:            s.full(key),
-		Body:           bytes.NewReader(body),
-		ContentLength:  aws.Int64(int64(len(body))),
-		ChecksumSHA256: aws.String(base64.StdEncoding.EncodeToString(sum[:])),
-		Metadata:       map[string]string{MetaSHA256: hex.EncodeToString(sum[:])},
+		Body:           body,
+		ContentLength:  aws.Int64(sums.Size),
+		ChecksumSHA256: aws.String(sha256),
+		Metadata:       opts.metadata(sums.SHA256),
 	}
 	if opts.ContentType != "" {
 		in.ContentType = aws.String(opts.ContentType)
@@ -221,14 +331,7 @@ func (s *Store) put(ctx context.Context, key string, body []byte, opts PutOption
 	if err != nil {
 		return Object{}, s.wrap("put", key, err)
 	}
-	return Object{
-		Key:          key,
-		Size:         int64(len(body)),
-		ETag:         aws.ToString(out.ETag),
-		SHA256:       hex.EncodeToString(sum[:]),
-		ContentType:  opts.ContentType,
-		CacheControl: opts.CacheControl,
-	}, nil
+	return opts.object(key, sums.Size, aws.ToString(out.ETag), sums.SHA256), nil
 }
 
 // CopyIfSourceMatch copies src to dst server side, only if src still has srcETag.
@@ -286,6 +389,37 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 		return s.wrap("delete", key, err)
 	}
 	return nil
+}
+
+// DeleteOwned deletes an object only if it carries the stamp release and the hex SHA256 sha256.
+//
+// It is the only delete that reaches public package paths. A matching stamp with
+// other content fails with ErrHashMismatch and deletes nothing. R2 ignores
+// conditions on DeleteObject, so the global lock must exclude other writers.
+func (s *Store) DeleteOwned(ctx context.Context, key, release, sha256 string) (DeleteResult, error) {
+	if release == "" || sha256 == "" {
+		return 0, fmt.Errorf("delete owned %s: release and sha256 are required", key)
+	}
+	if key == "" || strings.Contains(key, "..") {
+		return 0, fmt.Errorf("delete owned %q: refused", key)
+	}
+	obj, err := s.Head(ctx, key)
+	if errors.Is(err, ErrNotFound) {
+		return Absent, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if obj.Release != release {
+		return NotOwned, nil
+	}
+	if obj.SHA256 != sha256 {
+		return 0, fmt.Errorf("delete owned %s: stamp %s, sha256 %s, want %s: %w", key, release, obj.SHA256, sha256, ErrHashMismatch)
+	}
+	if _, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &s.bucket, Key: s.full(key)}); err != nil {
+		return 0, s.wrap("delete", key, err)
+	}
+	return Deleted, nil
 }
 
 func (s *Store) canDelete(key string) bool {

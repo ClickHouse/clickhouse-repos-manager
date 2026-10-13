@@ -71,8 +71,8 @@ func TestPutIfMatch(t *testing.T) {
 	if _, err := s.PutIfMatch(ctx, "lock", first.ETag, []byte("v3"), store.PutOptions{}); !errors.Is(err, store.ErrPrecondition) {
 		t.Fatalf("stale PutIfMatch: %v, want ErrPrecondition", err)
 	}
-	if _, err := s.PutIfMatch(ctx, "missing", second.ETag, []byte("x"), store.PutOptions{}); err == nil {
-		t.Fatal("PutIfMatch created a missing object")
+	if _, err := s.PutIfMatch(ctx, "missing", second.ETag, []byte("x"), store.PutOptions{}); !errors.Is(err, store.ErrPrecondition) {
+		t.Fatalf("PutIfMatch of a missing key: %v, want ErrPrecondition", err)
 	}
 	body, _, err := s.Get(ctx, "lock")
 	if err != nil || string(body) != "v2" {
@@ -162,6 +162,79 @@ func TestCopySpecialKey(t *testing.T) {
 		body, _, err := s.Get(ctx, "copy/"+key)
 		if err != nil || string(body) != key || dst.ETag != src.ETag {
 			t.Fatalf("copy %q: got %q, %v", key, body, err)
+		}
+	}
+}
+
+func TestStampRoundTrip(t *testing.T) {
+	s, ctx := storetest.New(t), context.Background()
+	opts := store.PutOptions{Release: "v26.3.36.6-lts", SHA512: "abc"}
+	put, err := s.PutIfAbsent(ctx, "a", []byte("x"), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := s.Head(ctx, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, got, err := s.Get(ctx, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range []store.Object{put, head, got} {
+		if o.Release != opts.Release || o.SHA512 != opts.SHA512 || o.SHA256 != put.SHA256 {
+			t.Fatalf("stamp lost: %+v", o)
+		}
+	}
+	if _, err := s.PutIfAbsent(ctx, "b", []byte("x"), store.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if o, err := s.Head(ctx, "b"); err != nil || o.Release != "" || o.SHA512 != "" {
+		t.Fatalf("unstamped object: %+v, %v", o, err)
+	}
+}
+
+func TestDeleteOwned(t *testing.T) {
+	s, ctx := storetest.New(t), context.Background()
+	const tag = "v26.3.36.6-lts"
+	mine, err := s.PutIfAbsent(ctx, "deb/pool/mine.deb", []byte("mine"), store.PutOptions{Release: tag})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := s.PutIfAbsent(ctx, "deb/pool/other.deb", []byte("other"), store.PutOptions{Release: "v26.2.1.1-stable"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := s.PutIfAbsent(ctx, "deb/pool/plain.deb", []byte("plain"), store.PutOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.DeleteOwned(ctx, mine.Key, tag, other.SHA256); !errors.Is(err, store.ErrHashMismatch) {
+		t.Fatalf("wrong sha256: %v, want ErrHashMismatch", err)
+	}
+	for _, tc := range []struct {
+		key, sha256 string
+		want        store.DeleteResult
+	}{
+		{other.Key, other.SHA256, store.NotOwned},
+		{plain.Key, plain.SHA256, store.NotOwned},
+		{"deb/pool/missing.deb", mine.SHA256, store.Absent},
+		{mine.Key, mine.SHA256, store.Deleted},
+		{mine.Key, mine.SHA256, store.Absent},
+	} {
+		if got, err := s.DeleteOwned(ctx, tc.key, tag, tc.sha256); err != nil || got != tc.want {
+			t.Errorf("DeleteOwned(%s) = %v, %v, want %v", tc.key, got, err, tc.want)
+		}
+	}
+	for _, o := range []store.Object{other, plain} {
+		if _, err := s.Head(ctx, o.Key); err != nil {
+			t.Errorf("%s: %v, must stay", o.Key, err)
+		}
+	}
+	for _, bad := range [][3]string{{"k", "", "x"}, {"k", tag, ""}, {"", tag, "x"}, {"a/../b", tag, "x"}} {
+		if _, err := s.DeleteOwned(ctx, bad[0], bad[1], bad[2]); err == nil {
+			t.Errorf("DeleteOwned(%q) accepted", bad)
 		}
 	}
 }
