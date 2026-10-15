@@ -17,9 +17,18 @@ Work in progress. Available commands:
 * `ch-deploy lock --tag <tag> --date <tag date> [--run-id <id>] [--run-url <url>]`:
   takes the global release lock, or resumes the release that holds it. The
   first lock on a bucket adopts the live repository state.
-* `ch-deploy lock status`: prints the lock and its ETag.
+* `ch-deploy lock status`: prints the lock and its ETag, and the last lines of
+  the assets list of the release that holds it.
+* `ch-deploy unlock --tag <tag>`: after the client tests passed, prunes old
+  snapshots, freezes the tag and frees the lock.
+* `ch-deploy rollback --tag <tag>`: undoes the release that holds the lock:
+  the metadata goes back to the previous snapshot, and every object the
+  release created is deleted.
 * `ch-deploy lock break --tag <tag> [--force]`: frees the lock without
-  touching any file; emergency only.
+  touching any file. DANGEROUS, break glass only.
+
+`publish` exists in the library and comes to the command line with the first
+package type (TGZ).
 
 ## Launch parameters
 

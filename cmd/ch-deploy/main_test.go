@@ -32,6 +32,10 @@ func TestRun(t *testing.T) {
 		{args: []string{"lock", "status"}, code: 1, stderr: "bucket access needs"},
 		{args: []string{"lock", "break"}, code: 2, stdout: "--tag is required"},
 		{args: []string{"lock", "break", "-h"}, code: 0, stdout: "-force"},
+		{args: []string{"help"}, code: 0, stderr: "rollback"},
+		{args: []string{"unlock"}, code: 2, stdout: "--tag is required"},
+		{args: []string{"unlock", "-h"}, code: 0, stdout: "-tag"},
+		{args: []string{"rollback", "--tag", "v1.2.3.4-lts"}, code: 1, stderr: "bucket access needs"},
 	} {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
 			t.Setenv("CH_DEPLOY_ENDPOINT", "")
@@ -69,6 +73,10 @@ func TestLockCommands(t *testing.T) {
 	sh(0, `"state": "free"`, "lock", "break", "--tag", "v26.3.36.6-lts")
 	sh(1, "the lock is free", "lock", "break", "--tag", "v26.3.36.6-lts")
 	sh(0, `"previous": "00000000T000000Z-adopted"`, "lock", "--tag", "v26.7.19.5-stable", "--date", "2026-10-01T08:00:00Z")
+	sh(1, "unlock needs state committed, the state is locked", "unlock", "--tag", "v26.7.19.5-stable")
+	sh(1, "held by v26.7.19.5-stable, not v26.3.36.6-lts", "rollback", "--tag", "v26.3.36.6-lts")
+	sh(0, `"state": "free"`, "rollback", "--tag", "v26.7.19.5-stable")
+	sh(1, "the lock is free", "unlock", "--tag", "v26.7.19.5-stable")
 }
 
 func TestCheckNeedsSomething(t *testing.T) {

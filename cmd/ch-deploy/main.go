@@ -28,10 +28,15 @@ type command struct {
 }
 
 var commands = map[string]command{
-	"version": {"print the version", runVersion},
-	"check":   {"check bucket access and the signing key", runCheck},
-	"lock":    {"take the release lock; 'lock status', 'lock break' (emergency only)", runLock},
+	"version":  {"print the version", runVersion},
+	"check":    {"check bucket access and the signing key", runCheck},
+	"lock":     {"take the release lock; 'lock status', 'lock break' (DANGEROUS, break glass only)", runLock},
+	"unlock":   {"free the lock after the client tests passed; the release is frozen", runUnlock},
+	"rollback": {"undo the release that holds the lock", runRollback},
 }
+
+// assetsTail is how many assets lines lock status prints.
+const assetsTail = 20
 
 var (
 	// errUsage marks errors caused by the command line; the flag package has already printed them.
@@ -139,7 +144,7 @@ func packageTypes() []release.PackageType { return nil }
 
 func releaser(l *config.Launch) (*release.Releaser, error) {
 	l.Resolve()
-	s, err := l.Store()
+	s, err := l.Store(config.SnapshotsPrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -218,6 +223,52 @@ func runLockStatus(args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout, "no lock (not adopted)")
 		return nil
 	}
+	if err := printLock(stdout, h); err != nil {
+		return err
+	}
+	lines, total, err := r.AssetsTail(ctx, assetsTail)
+	if err != nil || total == 0 {
+		return err
+	}
+	fmt.Fprintf(stdout, "assets, last %d of %d:\n", len(lines), total)
+	for _, line := range lines {
+		fmt.Fprintln(stdout, line)
+	}
+	return nil
+}
+
+func runUnlock(args []string, stdout io.Writer) error {
+	return runTagged("unlock", args, stdout, (*release.Releaser).Unlock)
+}
+
+func runRollback(args []string, stdout io.Writer) error {
+	return runTagged("rollback", args, stdout, (*release.Releaser).Rollback)
+}
+
+// runTagged runs a command that takes only --tag of the release holding the lock.
+func runTagged(name string, args []string, stdout io.Writer, do func(*release.Releaser, context.Context, string) (release.Held, error)) error {
+	var l config.Launch
+	var tag string
+	fs := newFlagSet(name, stdout)
+	l.Register(fs)
+	fs.StringVar(&tag, "tag", "", "tag of the release that holds the lock (required)")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	if tag == "" {
+		fmt.Fprintln(stdout, "--tag is required")
+		return errUsage
+	}
+	r, err := releaser(&l)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := signalContext()
+	defer cancel()
+	h, err := do(r, ctx, tag)
+	if err != nil {
+		return err
+	}
 	return printLock(stdout, h)
 }
 
@@ -228,7 +279,7 @@ func runLockBreak(args []string, stdout io.Writer) error {
 	fs := newFlagSet("lock break", stdout)
 	l.Register(fs)
 	fs.StringVar(&tag, "tag", "", "tag of the release that holds the lock (required)")
-	fs.BoolVar(&force, "force", false, "free the lock even if the live metadata differs from the previous snapshot")
+	fs.BoolVar(&force, "force", false, "DANGEROUS: free the lock even if the live metadata matches neither snapshot")
 	if err := parse(fs, args); err != nil {
 		return err
 	}

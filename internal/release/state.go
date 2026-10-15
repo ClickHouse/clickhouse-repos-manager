@@ -15,8 +15,12 @@ const Schema = 1
 const (
 	LockKey        = config.StatePrefix + "lock"
 	ReleasedPrefix = config.StatePrefix + "released/"
+	AssetsPrefix   = config.StatePrefix + "assets/"
 	manifestName   = "manifest.json"
 )
+
+// AssetsKey is the append only list of the assets of a release, named like its snapshot.
+func AssetsKey(name string) string { return AssetsPrefix + name }
 
 // SnapshotDir is the key prefix of a snapshot; the live key follows it.
 func SnapshotDir(name string) string { return config.SnapshotsPrefix + name + "/" }
@@ -24,7 +28,7 @@ func SnapshotDir(name string) string { return config.SnapshotsPrefix + name + "/
 // ManifestKey is the key of a snapshot's manifest.
 func ManifestKey(name string) string { return SnapshotDir(name) + manifestName }
 
-// ReleasedKey marks a tag as frozen; unlock writes it.
+// ReleasedKey marks a tag as frozen: unlock copies the release manifest there.
 func ReleasedKey(tag string) string { return ReleasedPrefix + tag }
 
 // State is the lock state.

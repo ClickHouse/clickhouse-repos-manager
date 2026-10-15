@@ -5,13 +5,14 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/ClickHouse/clickhouse-repos-manager/internal/config"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/store"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/storetest"
 )
 
 func memBucket(*testing.T) store.Bucket { return storetest.NewMem() }
 
-func realBucket(t *testing.T) store.Bucket { return storetest.New(t) }
+func realBucket(t *testing.T) store.Bucket { return storetest.New(t, config.SnapshotsPrefix) }
 
 // faultyRun runs step through the faulty bucket: it must succeed unless the
 // fault killed the run, and a Retried fault never kills it.

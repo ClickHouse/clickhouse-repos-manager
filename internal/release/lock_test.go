@@ -15,31 +15,6 @@ import (
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/storetest"
 )
 
-// fakeType keeps its metadata in <prefix>index, one key per line; the index is metadata too.
-type fakeType struct{ name string }
-
-func (f fakeType) Name() string   { return f.name }
-func (f fakeType) Prefix() string { return f.name + "/" }
-
-func (f fakeType) Live(ctx context.Context, b store.Bucket) ([]File, error) {
-	index, _, err := b.Get(ctx, f.Prefix()+"index")
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var files []File
-	for _, key := range append([]string{f.Prefix() + "index"}, strings.Fields(string(index))...) {
-		body, obj, err := b.Get(ctx, key)
-		if err != nil {
-			return nil, err
-		}
-		files = append(files, File{Key: key, Size: obj.Size, ETag: obj.ETag, SHA256: hashes.Bytes(body).SHA256})
-	}
-	return files, nil
-}
-
 var (
 	types   = []PackageType{fakeType{"deb"}, fakeType{"tgz"}}
 	started = time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
@@ -77,7 +52,7 @@ func seed(t *testing.T, b store.Bucket, objs map[string]string) {
 // backends runs fn on the in-memory bucket and, when configured, on the test bucket.
 func backends(t *testing.T, fn func(t *testing.T, b store.Bucket)) {
 	t.Run("mem", func(t *testing.T) { fn(t, storetest.NewMem()) })
-	t.Run("bucket", func(t *testing.T) { fn(t, storetest.New(t)) })
+	t.Run("bucket", func(t *testing.T) { fn(t, realBucket(t)) })
 }
 
 func mustLock(t *testing.T, r *Releaser, req LockRequest) Held {

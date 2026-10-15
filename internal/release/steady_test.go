@@ -5,77 +5,69 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-repos-manager/internal/hashes"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/store"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/storetest"
 )
 
-// The steady state after cutover: releases W and then X are published and the
-// lock is free. The adopted snapshot is gone (pruned), and W and X differ in
-// content, so code that mixes up snapshot and previous fails.
+// The steady state after cutover: releases W (lts) and then X (stable) are
+// published by the real protocol and the lock is free. The adopted snapshot is
+// gone (pruned), and W and X differ in content, so code that mixes up snapshot
+// and previous fails.
 var (
-	tagX  = "v26.8.2.1-stable"
-	dateX = "2026-09-15T00:00:00Z"
-	snapW = "20260901T000000Z-v26.8.1.1-stable"
+	reqW  = LockRequest{Tag: "v26.8.1.1-lts", Date: "2026-09-01T00:00:00Z"}
+	reqX  = LockRequest{Tag: "v26.8.2.1-stable", Date: "2026-09-15T00:00:00Z"}
+	tagX  = reqX.Tag
+	snapW = "20260901T000000Z-v26.8.1.1-lts"
 	snapX = "20260915T000000Z-v26.8.2.1-stable"
-	liveW = map[string]string{
-		"deb/index":             "deb/dists/lts/Release deb/dists/lts/main/binary-amd64/Packages",
-		"deb/dists/lts/Release": "release W",
-		"deb/dists/lts/main/binary-amd64/Packages": "packages W",
-	}
-	liveX = map[string]string{
-		"deb/index":             "deb/dists/lts/Release deb/dists/lts/main/binary-amd64/Packages",
-		"deb/dists/lts/Release": "release X",
-		"deb/dists/lts/main/binary-amd64/Packages": "packages X",
-	}
+	// stableRelease differs between W and X.
+	stableRelease = "deb/dists/stable/Release"
 )
 
-// writeSnapshot writes a complete snapshot as M1c will: files, then the manifest.
-// With publish, the files are also copied to their live keys, as the commit does.
-func writeSnapshot(t *testing.T, b store.Bucket, name string, files map[string]string, publish bool) {
+// publishRelease runs lock, publish and unlock of a release.
+func publishRelease(t *testing.T, b store.Bucket, req LockRequest) {
 	t.Helper()
-	ctx := context.Background()
-	keys := make([]string, 0, len(files))
-	for k := range files {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	m := Manifest{Schema: Schema, Tag: name[len("20060102T150405Z-"):], TagDate: "-"}
-	for _, k := range keys {
-		obj, err := b.Put(ctx, SnapshotDir(name)+k, []byte(files[k]), store.PutOptions{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if publish {
-			if _, err := b.CopyIfSourceMatch(ctx, SnapshotDir(name)+k, obj.ETag, k); err != nil {
-				t.Fatal(err)
-			}
-		}
-		m.Files = append(m.Files, File{Key: k, Size: obj.Size, ETag: obj.ETag, SHA256: hashes.Bytes([]byte(files[k])).SHA256})
-	}
-	if _, err := b.Put(ctx, ManifestKey(name), encode(m), store.PutOptions{}); err != nil {
+	r := releaser(b)
+	mustLock(t, r, req)
+	mustPublish(t, r, packageFiles(t, req.Tag))
+	if _, err := r.Unlock(context.Background(), req.Tag); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func mustPublish(t *testing.T, r *Releaser, paths []string) Held {
+	t.Helper()
+	h, err := r.Publish(context.Background(), paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
 }
 
 // steady seeds the steady state and returns the bucket wrapped so that any
 // call touching the adopted snapshot fails the test.
 func steady(t *testing.T, b store.Bucket) store.Bucket {
 	t.Helper()
-	writeSnapshot(t, b, snapW, liveW, false)
-	writeSnapshot(t, b, snapX, liveX, true)
-	l := Lock{Schema: Schema, Tag: tagX, TagDate: dateX, Snapshot: snapX, Previous: snapW, State: Free,
-		Attempts: []Attempt{{RunID: "x", Started: dateX, Version: "old"}}}
-	if _, err := b.Put(context.Background(), LockKey, encode(l), store.PutOptions{}); err != nil {
+	publishRelease(t, b, reqW)
+	publishRelease(t, b, reqX)
+	if err := releaser(b).deleteSnapshot(context.Background(), AdoptedSnapshot, false); err != nil {
 		t.Fatal(err)
 	}
 	return noAdopt(t, b)
+}
+
+// snapshotBody reads key from a snapshot.
+func snapshotBody(t *testing.T, b store.Bucket, name, key string) string {
+	t.Helper()
+	body, _, err := b.Get(context.Background(), SnapshotDir(name)+key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
 }
 
 func noAdopt(t *testing.T, b store.Bucket) store.Bucket {
@@ -148,13 +140,16 @@ func TestLockTable(t *testing.T) {
 
 // Lock from free compares the live files with snapshot, not with previous.
 func TestLockFromFreeLiveChanged(t *testing.T) {
-	for name, live := range map[string]map[string]string{
-		"by hand":        {"deb/dists/lts/Release": "changed by hand"},
-		"back to W":      {"deb/dists/lts/Release": liveW["deb/dists/lts/Release"]},
-		"index deleted?": nil,
-	} {
+	for _, name := range []string{"by hand", "back to W", "index deleted"} {
 		t.Run(name, func(t *testing.T) {
 			b := steady(t, storetest.NewMem())
+			live := map[string]string{stableRelease: "changed by hand"}
+			switch name {
+			case "back to W":
+				live[stableRelease] = snapshotBody(t, b, snapW, stableRelease)
+			case "index deleted":
+				live = nil
+			}
 			if live != nil {
 				setLive(t, b, live)
 			} else if err := b.Delete(context.Background(), "deb/index"); err != nil {
@@ -166,7 +161,7 @@ func TestLockFromFreeLiveChanged(t *testing.T) {
 			if live == nil {
 				wantErr(t, err, "deb/index: missing")
 			} else {
-				wantErr(t, err, "deb/dists/lts/Release: etag")
+				wantErr(t, err, stableRelease+": etag")
 			}
 			if !reflect.DeepEqual(stored(t, b, Held{}), before) {
 				t.Fatal("the lock changed")
@@ -175,7 +170,7 @@ func TestLockFromFreeLiveChanged(t *testing.T) {
 	}
 	backends(t, func(t *testing.T, b store.Bucket) {
 		b = steady(t, b)
-		setLive(t, b, map[string]string{"deb/dists/lts/Release": "changed by hand"})
+		setLive(t, b, map[string]string{stableRelease: "changed by hand"})
 		_, err := releaser(b).Lock(context.Background(), reqA)
 		wantErr(t, err, "live metadata differs from snapshot "+snapX)
 	})
@@ -204,7 +199,7 @@ func TestBreak(t *testing.T) {
 		wantErr(t, err, "held by v26.3.36.6-lts, not v26.7.19.5-stable")
 
 		// Live equal to W, the snapshot before previous: still a mismatch.
-		setLive(t, b, map[string]string{"deb/dists/lts/Release": liveW["deb/dists/lts/Release"]})
+		setLive(t, b, map[string]string{stableRelease: snapshotBody(t, b, snapW, stableRelease)})
 		before := stored(t, b, Held{})
 		_, err = r.Break(ctx, reqA.Tag, false)
 		wantErr(t, err, "live metadata differs from snapshot "+snapX+"; refused without --force")
@@ -215,7 +210,7 @@ func TestBreak(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(res.Differs) != 1 || !strings.HasPrefix(res.Differs[0], "deb/dists/lts/Release:") {
+		if len(res.Differs) != 1 || !strings.HasPrefix(res.Differs[0], stableRelease+":") {
 			t.Fatalf("differs %q", res.Differs)
 		}
 		want := before

@@ -13,11 +13,17 @@ import (
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/store"
 )
 
-// PackageType is DEB, RPM or TGZ, as far as the lock and adopt need it.
+// PackageType is DEB, RPM or TGZ.
 type PackageType interface {
 	Name() string
 	// Prefix is the public key prefix, for example "deb/".
 	Prefix() string
+	// Match claims an input package by its file name.
+	Match(name string) bool
+	// Stage builds the assets and the index metadata of a release on top of
+	// previous. It returns only the index metadata it builds; the snapshot takes
+	// every other key from previous.
+	Stage(ctx context.Context, previous *Previous, tag Tag, packages []Package) (Plan, error)
 	// Live lists the live metadata files, after verifying them (signatures,
 	// hashes one level up). SHA256 is computed from the bytes it verified.
 	// An empty repository has no files.
@@ -70,6 +76,11 @@ func (r *Releaser) Lock(ctx context.Context, req LockRequest) (Held, error) {
 	}
 	attempt := Attempt{RunID: req.RunID, RunURL: req.RunURL, Started: r.now().UTC().Format(DateFormat), Version: r.Version}
 	snapshot := SnapshotName(tag, date)
+	if frozen, err := r.released(ctx, tag.Name); err != nil {
+		return Held{}, err
+	} else if frozen {
+		return Held{}, fmt.Errorf("%s is released and frozen; it is never published again", tag.Name)
+	}
 
 	// A second round only after losing the race to create the lock.
 	for round := 0; ; round++ {
@@ -244,12 +255,8 @@ func (r *Releaser) adopt(ctx context.Context) error {
 			if !strings.HasPrefix(f.Key, t.Prefix()) {
 				return fmt.Errorf("adopt %s: %s is outside %s", t.Name(), f.Key, t.Prefix())
 			}
-			obj, err := r.Bucket.CopyIfSourceMatch(ctx, f.Key, f.ETag, SnapshotDir(AdoptedSnapshot)+f.Key)
-			if err != nil {
+			if err := r.copyKnown(ctx, f.Key, SnapshotDir(AdoptedSnapshot)+f.Key, f); err != nil {
 				return fmt.Errorf("adopt %s: %w", t.Name(), err)
-			}
-			if obj.ETag != f.ETag || obj.Size != f.Size {
-				return fmt.Errorf("adopt %s: copy of %s has etag %s size %d, want %s %d", t.Name(), f.Key, obj.ETag, obj.Size, f.ETag, f.Size)
 			}
 			files = append(files, f)
 		}
@@ -275,9 +282,10 @@ type BreakResult struct {
 	Differs []string
 }
 
-// Break frees the lock without touching any file, from the facts: the live
-// metadata must equal the previous snapshot. With force a mismatch is recorded
-// and the next lock fails until an engineer cleans up.
+// Break frees the lock without touching any file, from the facts: live equal
+// to the release snapshot makes it the published one, live equal to previous
+// goes back to previous. With force a mismatch records previous, and the next
+// lock fails until an engineer cleans up. DANGEROUS: break glass only.
 func (r *Releaser) Break(ctx context.Context, tag string, force bool) (BreakResult, error) {
 	cur, found, err := r.read(ctx)
 	if err != nil {
@@ -292,6 +300,19 @@ func (r *Releaser) Break(ctx context.Context, tag string, force bool) (BreakResu
 	}
 	if l.Tag != tag {
 		return BreakResult{}, fmt.Errorf("the lock is held by %s, not %s", l.Tag, tag)
+	}
+	if m, err := r.manifest(ctx, l.Snapshot); err == nil {
+		diff, err := r.diffLive(ctx, m)
+		if err != nil {
+			return BreakResult{}, err
+		}
+		if len(diff) == 0 {
+			l.State = Free
+			held, err := r.write(ctx, l, cur.ETag)
+			return BreakResult{Held: held}, err
+		}
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return BreakResult{}, err
 	}
 	m, err := r.manifest(ctx, l.Previous)
 	if err != nil {
