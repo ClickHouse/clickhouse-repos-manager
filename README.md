@@ -14,6 +14,12 @@ Work in progress. Available commands:
 
 * `ch-deploy version`
 * `ch-deploy check`: checks bucket access and the signing key.
+* `ch-deploy lock --tag <tag> --date <tag date> [--run-id <id>] [--run-url <url>]`:
+  takes the global release lock, or resumes the release that holds it. The
+  first lock on a bucket adopts the live repository state.
+* `ch-deploy lock status`: prints the lock and its ETag.
+* `ch-deploy lock break --tag <tag> [--force]`: frees the lock without
+  touching any file; emergency only.
 
 ## Launch parameters
 
@@ -74,7 +80,8 @@ is unset. `test/miniflare/run.sh` sets `CH_DEPLOY_TEST_BACKEND=miniflare`, and
 not reproduce. `storetest.Faults` wraps a store and fails one mutating call:
 before it is sent, after it was applied (the response is lost), or by sending
 it twice as an SDK retry does; `storetest.ForEachFault` runs a scenario once
-per call and mode.
+per call and mode. `storetest.NewMem()` is an in-memory bucket for fast
+protocol tests and the full fault matrix.
 
 A key exported by gpg can be checked with
 `CH_DEPLOY_TEST_SIGNING_KEY_FILE` (base64 secret export) and

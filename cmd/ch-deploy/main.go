@@ -3,16 +3,20 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"runtime/debug"
 	"sort"
+	"syscall"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/config"
+	"github.com/ClickHouse/clickhouse-repos-manager/internal/release"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -26,6 +30,7 @@ type command struct {
 var commands = map[string]command{
 	"version": {"print the version", runVersion},
 	"check":   {"check bucket access and the signing key", runCheck},
+	"lock":    {"take the release lock; 'lock status', 'lock break' (emergency only)", runLock},
 }
 
 var (
@@ -127,6 +132,124 @@ func revision() string {
 		return ""
 	}
 	return " (" + rev + dirty + ")"
+}
+
+// packageTypes are the package types this build knows; adopt covers only them.
+func packageTypes() []release.PackageType { return nil }
+
+func releaser(l *config.Launch) (*release.Releaser, error) {
+	l.Resolve()
+	s, err := l.Store()
+	if err != nil {
+		return nil, err
+	}
+	return &release.Releaser{Bucket: s, Types: packageTypes(), Version: version + revision()}, nil
+}
+
+// signalContext stops at SIGINT or SIGTERM; conditional writes make a stop at any point safe to rerun.
+func signalContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+}
+
+func printLock(w io.Writer, h release.Held) error {
+	b, err := json.MarshalIndent(h.Lock, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "%s\netag: %s\n", b, h.ETag)
+	return err
+}
+
+func runLock(args []string, stdout io.Writer) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "status":
+			return runLockStatus(args[1:], stdout)
+		case "break":
+			return runLockBreak(args[1:], stdout)
+		}
+	}
+	var l config.Launch
+	var req release.LockRequest
+	fs := newFlagSet("lock", stdout)
+	l.Register(fs)
+	fs.StringVar(&req.Tag, "tag", "", "release tag, v<major>.<minor>.<patch>.<build>-lts or -stable (required)")
+	fs.StringVar(&req.Date, "date", "", "creation time of the annotated tag, YYYY-MM-DDTHH:MM:SSZ (required)")
+	fs.StringVar(&req.RunID, "run-id", "", "CI run id, recorded in the lock")
+	fs.StringVar(&req.RunURL, "run-url", "", "CI run URL, recorded in the lock")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	if req.Tag == "" || req.Date == "" {
+		fmt.Fprintln(stdout, "--tag and --date are required")
+		return errUsage
+	}
+	r, err := releaser(&l)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := signalContext()
+	defer cancel()
+	h, err := r.Lock(ctx, req)
+	if err != nil {
+		return err
+	}
+	return printLock(stdout, h)
+}
+
+func runLockStatus(args []string, stdout io.Writer) error {
+	var l config.Launch
+	fs := newFlagSet("lock status", stdout)
+	l.Register(fs)
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	r, err := releaser(&l)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := signalContext()
+	defer cancel()
+	h, found, err := r.Status(ctx)
+	if err != nil {
+		return err
+	}
+	if !found {
+		fmt.Fprintln(stdout, "no lock (not adopted)")
+		return nil
+	}
+	return printLock(stdout, h)
+}
+
+func runLockBreak(args []string, stdout io.Writer) error {
+	var l config.Launch
+	var tag string
+	var force bool
+	fs := newFlagSet("lock break", stdout)
+	l.Register(fs)
+	fs.StringVar(&tag, "tag", "", "tag of the release that holds the lock (required)")
+	fs.BoolVar(&force, "force", false, "free the lock even if the live metadata differs from the previous snapshot")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	if tag == "" {
+		fmt.Fprintln(stdout, "--tag is required")
+		return errUsage
+	}
+	r, err := releaser(&l)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := signalContext()
+	defer cancel()
+	res, err := r.Break(ctx, tag, force)
+	if err != nil {
+		return err
+	}
+	for _, d := range res.Differs {
+		fmt.Fprintf(stdout, "differs: %s\n", d)
+	}
+	return printLock(stdout, res.Held)
 }
 
 func runCheck(args []string, stdout io.Writer) error {

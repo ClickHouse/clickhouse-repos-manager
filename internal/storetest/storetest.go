@@ -121,15 +121,7 @@ func New(t testing.TB, deletable ...string) *store.Store {
 // Prefix and credentials are set before edit runs and must stay.
 func NewConfig(t testing.TB, edit func(*store.Config)) *store.Store {
 	t.Helper()
-	env, ok := FromEnv()
-	if !ok {
-		t.Skip("CH_DEPLOY_TEST_ENDPOINT and CH_DEPLOY_TEST_BUCKET are not set")
-	}
-	run, err := RunPrefix()
-	if err != nil {
-		t.Fatal(err)
-	}
-	prefix := run + "/" + unsafeName.ReplaceAllString(t.Name(), "_") + "-" + randomHex(4)
+	env, prefix := NewPrefix(t)
 	cfg := env.Config(prefix)
 	edit(&cfg)
 	if cfg.Prefix != prefix || cfg.DeleteAnyKey {
@@ -139,12 +131,28 @@ func NewConfig(t testing.TB, edit func(*store.Config)) *store.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return s
+}
+
+// NewPrefix returns the test bucket and a prefix of its own for this test,
+// removed when the test ends. It skips the test without a bucket.
+func NewPrefix(t testing.TB) (Env, string) {
+	t.Helper()
+	env, ok := FromEnv()
+	if !ok {
+		t.Skip("CH_DEPLOY_TEST_ENDPOINT and CH_DEPLOY_TEST_BUCKET are not set")
+	}
+	run, err := RunPrefix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := run + "/" + unsafeName.ReplaceAllString(t.Name(), "_") + "-" + randomHex(4)
 	t.Cleanup(func() {
 		if _, err := Purge(context.Background(), env, prefix); err != nil {
 			t.Errorf("cleanup %s: %v", prefix, err)
 		}
 	})
-	return s
+	return env, prefix
 }
 
 // Purge deletes every object under prefix, which must be below store.TestPrefix.

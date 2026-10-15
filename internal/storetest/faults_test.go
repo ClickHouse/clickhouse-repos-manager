@@ -1,103 +1,15 @@
 package storetest
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"io"
-	"sync"
 	"testing"
 
-	"github.com/ClickHouse/clickhouse-repos-manager/internal/hashes"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/store"
 )
 
-// memBucket is just enough of a bucket to test Faults; it is not an R2 model.
-type memBucket struct {
-	mu   sync.Mutex
-	objs map[string]store.Object
-	body map[string][]byte
-	n    int
-}
-
-func newMem() *memBucket {
-	return &memBucket{objs: map[string]store.Object{}, body: map[string][]byte{}}
-}
-
-func (m *memBucket) Get(_ context.Context, key string) ([]byte, store.Object, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	o, ok := m.objs[key]
-	if !ok {
-		return nil, store.Object{}, store.ErrNotFound
-	}
-	return m.body[key], o, nil
-}
-
-func (m *memBucket) Open(ctx context.Context, key string) (io.ReadCloser, store.Object, error) {
-	b, o, err := m.Get(ctx, key)
-	return io.NopCloser(bytes.NewReader(b)), o, err
-}
-
-func (m *memBucket) Head(ctx context.Context, key string) (store.Object, error) {
-	_, o, err := m.Get(ctx, key)
-	return o, err
-}
-
-func (m *memBucket) List(context.Context, string, func(store.Object) error) error { return nil }
-
-// put stores body when cond accepts the current object (nil when absent).
-func (m *memBucket) put(key string, body []byte, cond func(*store.Object) bool) (store.Object, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var cur *store.Object
-	if o, ok := m.objs[key]; ok {
-		cur = &o
-	}
-	if cond != nil && !cond(cur) {
-		return store.Object{}, store.ErrPrecondition
-	}
-	m.n++
-	o := store.Object{Key: key, Size: int64(len(body)), ETag: fmt.Sprintf("%q", fmt.Sprint(m.n))}
-	m.objs[key], m.body[key] = o, body
-	return o, nil
-}
-
-func (m *memBucket) PutIfAbsent(_ context.Context, key string, body []byte, _ store.PutOptions) (store.Object, error) {
-	return m.put(key, body, func(o *store.Object) bool { return o == nil })
-}
-
-func (m *memBucket) PutIfMatch(_ context.Context, key, etag string, body []byte, _ store.PutOptions) (store.Object, error) {
-	return m.put(key, body, func(o *store.Object) bool { return o != nil && o.ETag == etag })
-}
-
-func (m *memBucket) Put(_ context.Context, key string, body []byte, _ store.PutOptions) (store.Object, error) {
-	return m.put(key, body, nil)
-}
-
-func (m *memBucket) PutFileIfAbsent(context.Context, string, string, hashes.Sums, store.PutOptions) (store.Object, error) {
-	return store.Object{}, errors.New("not implemented")
-}
-
-func (m *memBucket) CopyIfSourceMatch(context.Context, string, string, string) (store.Object, error) {
-	return store.Object{}, errors.New("not implemented")
-}
-
-func (m *memBucket) Delete(_ context.Context, key string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.objs, key)
-	delete(m.body, key)
-	return nil
-}
-
-func (m *memBucket) DeleteOwned(ctx context.Context, key, _, _ string) (store.DeleteResult, error) {
-	return store.Deleted, m.Delete(ctx, key)
-}
-
 func TestFaultsBefore(t *testing.T) {
-	ctx, m := context.Background(), newMem()
+	ctx, m := context.Background(), NewMem()
 	f := &Faults{B: m, N: 2, Mode: Before}
 	if _, err := f.Put(ctx, "a", []byte("1"), store.PutOptions{}); err != nil {
 		t.Fatal(err)
@@ -123,7 +35,7 @@ func TestFaultsBefore(t *testing.T) {
 }
 
 func TestFaultsAfter(t *testing.T) {
-	ctx, m := context.Background(), newMem()
+	ctx, m := context.Background(), NewMem()
 	f := &Faults{B: m, N: 1, Mode: After}
 	if err := f.Delete(ctx, "missing"); !errors.Is(err, ErrInjected) {
 		t.Fatalf("call 1: %v, want ErrInjected", err)
@@ -138,7 +50,7 @@ func TestFaultsAfter(t *testing.T) {
 }
 
 func TestFaultsRetried(t *testing.T) {
-	ctx, m := context.Background(), newMem()
+	ctx, m := context.Background(), NewMem()
 	first, err := m.PutIfAbsent(ctx, "lock", []byte("v1"), store.PutOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -163,7 +75,7 @@ func TestFaultsRetried(t *testing.T) {
 }
 
 func TestMemBucketPutIfMatch(t *testing.T) {
-	ctx, m := context.Background(), newMem()
+	ctx, m := context.Background(), NewMem()
 	if _, err := m.PutIfMatch(ctx, "missing", `"1"`, nil, store.PutOptions{}); !errors.Is(err, store.ErrPrecondition) {
 		t.Fatalf("missing key: %v, want ErrPrecondition as on R2", err)
 	}
@@ -183,7 +95,7 @@ func TestMemBucketPutIfMatch(t *testing.T) {
 func TestForEachFault(t *testing.T) {
 	runs := 0
 	var subtests []string
-	ForEachFault(t, func(*testing.T) store.Bucket { return newMem() }, func(t *testing.T, b store.Bucket, f *Faults) {
+	ForEachFault(t, func(*testing.T) store.Bucket { return NewMem() }, func(t *testing.T, b store.Bucket, f *Faults) {
 		runs++
 		subtests = append(subtests, t.Name())
 		ctx := context.Background()
