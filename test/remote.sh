@@ -8,6 +8,10 @@ set -euo pipefail
 : "${AWS_SECRET_ACCESS_KEY:?is not set}"
 export CH_DEPLOY_TEST_ENDPOINT AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 export CH_DEPLOY_TEST_BUCKET=${CH_DEPLOY_TEST_BUCKET:-packages-dev}
+# The public URL check of publish reads this; other buckets get a local stand in.
+if [ "$CH_DEPLOY_TEST_BUCKET" = packages-dev ]; then
+	export CH_DEPLOY_TEST_PUBLIC_URL=${CH_DEPLOY_TEST_PUBLIC_URL:-https://pub-fbb7005823dc4b079b49d72501aa08db.r2.dev}
+fi
 
 cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)

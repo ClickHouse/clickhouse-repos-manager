@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/sign"
@@ -41,6 +42,8 @@ const (
 	EnvSigningKeyFile = "CH_DEPLOY_SIGNING_KEY_FILE"
 	EnvPassphrase     = "CH_DEPLOY_SIGNING_PASSPHRASE"
 	EnvSignWith       = "CH_DEPLOY_SIGN_WITH"
+	EnvPartSize       = "CH_DEPLOY_PART_SIZE"
+	EnvConcurrency    = "CH_DEPLOY_UPLOAD_CONCURRENCY"
 	EnvAccessKeyID    = "AWS_ACCESS_KEY_ID"
 	EnvSecretKey      = "AWS_SECRET_ACCESS_KEY"
 )
@@ -53,6 +56,9 @@ type Launch struct {
 	PublicURL      string
 	SigningKeyFile string
 	SignWith       string
+	// PartSize and UploadConcurrency are numbers; empty means the default.
+	PartSize          string
+	UploadConcurrency string
 
 	getenv func(string) string
 }
@@ -65,6 +71,8 @@ func (l *Launch) Register(fs *flag.FlagSet) {
 	fs.StringVar(&l.PublicURL, "public-url", "", "public base URL of the bucket (env "+EnvPublicURL+")")
 	fs.StringVar(&l.SigningKeyFile, "signing-key-file", "", "file with the secret key export (env "+EnvSigningKeyFile+", or the key itself in "+EnvSigningKey+")")
 	fs.StringVar(&l.SignWith, "sign-with", "", "fingerprint of the signing key (env "+EnvSignWith+")")
+	fs.StringVar(&l.PartSize, "part-size", "", fmt.Sprintf("multipart part size in bytes, at least %d (env %s, default %d)", store.MinPartSize, EnvPartSize, store.DefaultPartSize))
+	fs.StringVar(&l.UploadConcurrency, "upload-concurrency", "", fmt.Sprintf("requests that send data at once (env %s, default %d)", EnvConcurrency, store.DefaultUploadConcurrency))
 }
 
 // Resolve fills unset flags from the environment. Call it after parsing.
@@ -83,6 +91,8 @@ func (l *Launch) Resolve() {
 		{&l.PublicURL, EnvPublicURL},
 		{&l.SigningKeyFile, EnvSigningKeyFile},
 		{&l.SignWith, EnvSignWith},
+		{&l.PartSize, EnvPartSize},
+		{&l.UploadConcurrency, EnvConcurrency},
 	} {
 		if *f.v == "" {
 			*f.v = getenv(f.env)
@@ -103,6 +113,15 @@ func (l *Launch) HasSigner() bool {
 
 // Store connects to the bucket. Deletes are allowed only under the given prefixes.
 func (l *Launch) Store(deletable ...string) (*store.Store, error) {
+	cfg, err := l.StoreConfig(deletable...)
+	if err != nil {
+		return nil, err
+	}
+	return store.New(cfg)
+}
+
+// StoreConfig is the configuration Store connects with.
+func (l *Launch) StoreConfig(deletable ...string) (store.Config, error) {
 	cfg := store.Config{
 		Endpoint:        l.Endpoint,
 		Bucket:          l.Bucket,
@@ -110,6 +129,13 @@ func (l *Launch) Store(deletable ...string) (*store.Store, error) {
 		AccessKeyID:     l.env(EnvAccessKeyID),
 		SecretAccessKey: l.env(EnvSecretKey),
 		Deletable:       deletable,
+	}
+	var err error
+	if cfg.PartSize, err = number("part size", l.PartSize); err != nil {
+		return store.Config{}, err
+	}
+	if cfg.UploadConcurrency, err = l.Concurrency(); err != nil {
+		return store.Config{}, err
 	}
 	var missing []string
 	if cfg.Endpoint == "" {
@@ -122,9 +148,38 @@ func (l *Launch) Store(deletable ...string) (*store.Store, error) {
 		missing = append(missing, EnvAccessKeyID+" and "+EnvSecretKey)
 	}
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("bucket access needs %s", strings.Join(missing, ", "))
+		return store.Config{}, fmt.Errorf("bucket access needs %s", strings.Join(missing, ", "))
 	}
-	return store.New(cfg)
+	return cfg, nil
+}
+
+// Concurrency is UploadConcurrency as a number, 0 for the default.
+func (l *Launch) Concurrency() (int, error) {
+	n, err := number("upload concurrency", l.UploadConcurrency)
+	return int(n), err
+}
+
+// PublicBase is the public URL of the keys under Prefix, empty without PublicURL.
+func (l *Launch) PublicBase() string {
+	if l.PublicURL == "" {
+		return ""
+	}
+	if p := strings.Trim(l.Prefix, "/"); p != "" {
+		return l.PublicURL + "/" + p
+	}
+	return l.PublicURL
+}
+
+// number parses a positive decimal; empty is 0, the default. store.New checks the limits.
+func number(what, s string) (int64, error) {
+	if s == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%s %q: want a positive number", what, s)
+	}
+	return n, nil
 }
 
 // Signer loads the signing key.

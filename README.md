@@ -17,6 +17,13 @@ Work in progress. Available commands:
 * `ch-deploy lock --tag <tag> --date <tag date> [--run-id <id>] [--run-url <url>]`:
   takes the global release lock, or resumes the release that holds it. The
   first lock on a bucket adopts the live repository state.
+* `ch-deploy publish [--only-tgz] [--only-rpm] [--only-deb] <files...>`:
+  publishes the packages of the release that holds the lock, or continues an
+  interrupted publish of it. The tag and the version come from the lock. Every
+  file name must carry that version, and the package types must have the same
+  packages and architectures; `--only-*` narrows that check to the named
+  types. Flags come before the files. With `--public-url` it also checks the
+  packages at the public URL. This build knows TGZ only.
 * `ch-deploy lock status`: prints the lock and its ETag, and the last lines of
   the assets list of the release that holds it.
 * `ch-deploy unlock --tag <tag>`: after the client tests passed, prunes old
@@ -26,9 +33,6 @@ Work in progress. Available commands:
   release created is deleted.
 * `ch-deploy lock break --tag <tag> [--force]`: frees the lock without
   touching any file. DANGEROUS, break glass only.
-
-`publish` exists in the library and comes to the command line with the first
-package type (TGZ).
 
 ## Launch parameters
 
@@ -46,6 +50,8 @@ the environment or from a file, never from a flag value.
 | | `CH_DEPLOY_SIGNING_KEY` | the secret key export itself |
 | | `CH_DEPLOY_SIGNING_PASSPHRASE` | passphrase, if the key has one |
 | `--sign-with` | `CH_DEPLOY_SIGN_WITH` | full fingerprint of the signing (sub)key |
+| `--part-size` | `CH_DEPLOY_PART_SIZE` | multipart part size in bytes, default 64 MiB, at least 5 MiB |
+| `--upload-concurrency` | `CH_DEPLOY_UPLOAD_CONCURRENCY` | requests that send data at once, and parallel checks, default 4 |
 
 The key named by `--sign-with` signs exactly; there is no fallback to another
 subkey or to the primary key.
@@ -74,9 +80,14 @@ AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
 make test-remote
 ```
 
+For `packages-dev` the script sets `CH_DEPLOY_TEST_PUBLIC_URL` to the public
+URL of the bucket, which the `publish` test checks; without it a local server
+stands in. Miniflare cannot list multipart uploads, so there failed uploads
+are aborted instead of resumed, and the resume tests skip.
+
 All test data lives below `ch-deploy-test/`. A run uses the prefix
 `ch-deploy-test/<UTC time>-<random>/`, and every test a prefix of its own
-inside it, deleted when the test ends. After `go test` exits, even on a
+inside it, deleted with its open multipart uploads when the test ends. After `go test` exits, even on a
 panic or Ctrl+C, the script deletes the run prefix and any run prefix older
 than 24 hours. The same cleanup works by hand:
 `go run ./test/cleanup [-stale 24h] [prefix...]`. It refuses prefixes outside

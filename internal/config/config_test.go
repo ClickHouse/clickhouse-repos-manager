@@ -48,6 +48,34 @@ func TestStoreNeedsEverything(t *testing.T) {
 	}
 }
 
+func TestUploadParameters(t *testing.T) {
+	base := map[string]string{EnvEndpoint: "https://e", EnvBucket: "b", EnvAccessKeyID: "a", EnvSecretKey: "s", EnvPartSize: "6000000", EnvConcurrency: "3"}
+	cfg, err := parse(t, base, "--upload-concurrency", "8").StoreConfig()
+	if err != nil || cfg.PartSize != 6000000 || cfg.UploadConcurrency != 8 {
+		t.Fatalf("config %+v, %v", cfg, err)
+	}
+	for _, bad := range [][]string{{"--part-size", "64MiB"}, {"--part-size", "0"}, {"--upload-concurrency", "-1"}} {
+		if _, err := parse(t, base, bad...).StoreConfig(); err == nil || !strings.Contains(err.Error(), "want a positive number") {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+	if _, err := parse(t, base, "--part-size", "1000").Store(); err == nil {
+		t.Error("a part size below the minimum was accepted")
+	}
+}
+
+func TestPublicBase(t *testing.T) {
+	for _, tc := range []struct{ url, prefix, want string }{
+		{"", "p", ""},
+		{"https://pub/", "", "https://pub"},
+		{"https://pub", "/ch-deploy-test/run/", "https://pub/ch-deploy-test/run"},
+	} {
+		if got := parse(t, map[string]string{EnvPublicURL: tc.url, EnvPrefix: tc.prefix}).PublicBase(); got != tc.want {
+			t.Errorf("PublicBase(%q, %q) = %q, want %q", tc.url, tc.prefix, got, tc.want)
+		}
+	}
+}
+
 func TestSignerSources(t *testing.T) {
 	file, fpr := os.Getenv("CH_DEPLOY_TEST_SIGNING_KEY_FILE"), os.Getenv("CH_DEPLOY_TEST_SIGN_WITH")
 	if file == "" || fpr == "" {

@@ -17,6 +17,8 @@ import (
 
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/config"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/release"
+	"github.com/ClickHouse/clickhouse-repos-manager/internal/store"
+	"github.com/ClickHouse/clickhouse-repos-manager/internal/tgz"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -31,6 +33,7 @@ var commands = map[string]command{
 	"version":  {"print the version", runVersion},
 	"check":    {"check bucket access and the signing key", runCheck},
 	"lock":     {"take the release lock; 'lock status', 'lock break' (DANGEROUS, break glass only)", runLock},
+	"publish":  {"publish the packages of the release that holds the lock, or continue it", runPublish},
 	"unlock":   {"free the lock after the client tests passed; the release is frozen", runUnlock},
 	"rollback": {"undo the release that holds the lock", runRollback},
 }
@@ -140,15 +143,33 @@ func revision() string {
 }
 
 // packageTypes are the package types this build knows; adopt covers only them.
-func packageTypes() []release.PackageType { return nil }
+func packageTypes() []release.PackageType { return []release.PackageType{tgz.Type{}} }
+
+// testStoreConfig is set only by tests, for buckets the store must treat
+// differently (Miniflare cannot list multipart uploads).
+var testStoreConfig func(*store.Config)
 
 func releaser(l *config.Launch) (*release.Releaser, error) {
 	l.Resolve()
-	s, err := l.Store(config.SnapshotsPrefix)
+	cfg, err := l.StoreConfig(config.SnapshotsPrefix)
 	if err != nil {
 		return nil, err
 	}
-	return &release.Releaser{Bucket: s, Types: packageTypes(), Version: version + revision()}, nil
+	if testStoreConfig != nil {
+		testStoreConfig(&cfg)
+	}
+	s, err := store.New(cfg)
+	if err != nil {
+		return nil, err
+	}
+	concurrency, err := l.Concurrency()
+	if err != nil {
+		return nil, err
+	}
+	return &release.Releaser{
+		Bucket: s, Types: packageTypes(), Version: version + revision(),
+		Concurrency: concurrency, PublicURL: l.PublicBase(),
+	}, nil
 }
 
 // signalContext stops at SIGINT or SIGTERM; conditional writes make a stop at any point safe to rerun.
@@ -235,6 +256,55 @@ func runLockStatus(args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout, line)
 	}
 	return nil
+}
+
+func runPublish(args []string, stdout io.Writer) error {
+	var l config.Launch
+	fs := newFlagSet("publish", stdout)
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "Usage: ch-deploy publish [flags] <files...>\n\nFlags come before the files.")
+		fs.PrintDefaults()
+	}
+	l.Register(fs)
+	only := map[string]*bool{}
+	for _, name := range []string{"deb", "rpm", "tgz"} {
+		only[name] = fs.Bool("only-"+name, false, "publish only "+name+" packages; combinable, narrows the file set check")
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return errHelp
+		}
+		return errUsage
+	}
+	if fs.NArg() == 0 {
+		fmt.Fprintln(stdout, "no files given")
+		return errUsage
+	}
+	var types []string
+	for _, name := range []string{"deb", "rpm", "tgz"} {
+		if *only[name] {
+			types = append(types, name)
+		}
+	}
+	r, err := releaser(&l)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := signalContext()
+	defer cancel()
+	p, err := r.Publish(ctx, fs.Args(), types)
+	if err != nil {
+		return err
+	}
+	if err := printLock(stdout, p.Held); err != nil {
+		return err
+	}
+	if r.PublicURL == "" {
+		_, err = fmt.Fprintln(stdout, "public URL check: skipped, no --public-url")
+	} else {
+		_, err = fmt.Fprintf(stdout, "public URL check: %d objects at %s\n", p.PublicChecked, r.PublicURL)
+	}
+	return err
 }
 
 func runUnlock(args []string, stdout io.Writer) error {
