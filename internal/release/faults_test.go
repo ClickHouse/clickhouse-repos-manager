@@ -15,10 +15,13 @@ func memBucket(*testing.T) store.Bucket { return newMem() }
 func realBucket(t *testing.T) store.Bucket { return storetest.New(t, config.SnapshotsPrefix) }
 
 // faultyRun runs step through the faulty bucket: it must succeed unless the
-// fault killed the run, and a Retried fault never kills it.
+// fault killed the run, and a Retried fault never kills it. One request at a
+// time gives ForEachFault a fixed call order.
 func faultyRun(t *testing.T, f *storetest.Faults, step func(r *Releaser) error) {
 	t.Helper()
-	err := step(releaser(f))
+	r := releaser(f)
+	r.Concurrency = 1
+	err := step(r)
 	if err != nil && (!f.Injected() || f.Mode == storetest.Retried) {
 		t.Fatalf("faulty run (%s): %v", f.Mode, err)
 	}
@@ -37,6 +40,7 @@ func lockFromMissing(t *testing.T, b store.Bucket, f *storetest.Faults) {
 }
 
 func TestLockFaults(t *testing.T) {
+	t.Parallel()
 	t.Run("mem", func(t *testing.T) { storetest.ForEachFault(t, memBucket, lockFromMissing) })
 	t.Run("bucket", func(t *testing.T) { storetest.ForEachFault(t, realBucket, lockFromMissing) })
 }

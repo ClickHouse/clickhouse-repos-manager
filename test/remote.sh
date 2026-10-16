@@ -30,6 +30,8 @@ finish() {
 trap finish EXIT
 
 echo "bucket $CH_DEPLOY_TEST_BUCKET, prefix $CH_DEPLOY_TEST_PREFIX"
-# The release tests build their steady state with real releases: about 15 minutes on R2.
-[ $# -gt 0 ] || set -- -race -timeout 30m ./...
+# The release tests build their steady state with real releases, each test in
+# a prefix of its own; 8 at once take about 3 minutes on R2 without hitting its
+# request rate limit.
+[ $# -gt 0 ] || set -- -race -timeout 30m -parallel 8 ./...
 go test "$@"

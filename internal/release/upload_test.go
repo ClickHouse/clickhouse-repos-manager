@@ -246,6 +246,7 @@ func TestPublishConcurrent(t *testing.T) {
 		checkRolledBack(t, b, before)
 
 		slow := releaser(b)
+		slow.Concurrency = 1
 		mustLock(t, slow, reqA)
 		mustPublish(t, slow, files)
 		checkPublished(t, b, snapA)

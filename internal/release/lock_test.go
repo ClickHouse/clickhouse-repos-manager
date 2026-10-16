@@ -30,9 +30,8 @@ var (
 	}
 )
 
-// releaser runs one request at a time, so ForEachFault sees a fixed call order.
 func releaser(b store.Bucket) *Releaser {
-	return &Releaser{Bucket: b, Types: types, Version: "test", Now: func() time.Time { return started }, Concurrency: 1}
+	return &Releaser{Bucket: b, Types: types, Version: "test", Now: func() time.Time { return started }}
 }
 
 // newMem gives the fake packages, which are longer than 8 bytes, multipart ETags.
@@ -57,8 +56,11 @@ func seed(t *testing.T, b store.Bucket, objs map[string]string) {
 	}
 }
 
-// backends runs fn on the in-memory bucket and, when configured, on the test bucket.
+// backends runs fn on the in-memory bucket and, when configured, on the test
+// bucket. Every run has a bucket or prefix of its own, so the test runs in
+// parallel with the others.
 func backends(t *testing.T, fn func(t *testing.T, b store.Bucket)) {
+	t.Parallel()
 	t.Run("mem", func(t *testing.T) { fn(t, newMem()) })
 	t.Run("bucket", func(t *testing.T) { fn(t, realBucket(t)) })
 }
