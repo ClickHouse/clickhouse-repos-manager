@@ -171,7 +171,7 @@ func TestPublishFaults(t *testing.T) {
 		mustLock(t, releaser(b), reqA)
 		files := packageFiles(t, reqA.Tag)
 		f.Log = adoptGuard(t)
-		faultyRun(t, f, func(r *Releaser) error { _, err := r.Publish(context.Background(), files); return err })
+		faultyRun(t, f, func(r *Releaser) error { _, err := r.Publish(context.Background(), files, nil); return err })
 		b = noAdopt(t, b)
 		mustPublish(t, releaser(b), files)
 		checkPublished(t, b, snapA)
@@ -186,7 +186,7 @@ func TestRollbackAfterPublishFaults(t *testing.T) {
 		mustLock(t, releaser(b), reqA)
 		files := packageFiles(t, reqA.Tag)
 		f.Log = adoptGuard(t)
-		faultyRun(t, f, func(r *Releaser) error { _, err := r.Publish(context.Background(), files); return err })
+		faultyRun(t, f, func(r *Releaser) error { _, err := r.Publish(context.Background(), files, nil); return err })
 		b = noAdopt(t, b)
 		if _, err := releaser(b).Rollback(context.Background(), reqA.Tag); err != nil {
 			t.Fatal(err)
@@ -249,7 +249,7 @@ func TestPublishConflict(t *testing.T) {
 		before := objects(t, b)
 		r := releaser(b)
 		mustLock(t, r, reqA)
-		_, err := r.Publish(ctx, files)
+		_, err := r.Publish(ctx, files, nil)
 		wantErr(t, err, "exists with other content")
 		if _, err := r.Rollback(ctx, reqA.Tag); err != nil {
 			t.Fatal(err)
@@ -259,20 +259,41 @@ func TestPublishConflict(t *testing.T) {
 }
 
 func TestPublishRefused(t *testing.T) {
-	ctx, b := context.Background(), steady(t, storetest.NewMem())
+	ctx, b := context.Background(), steady(t, newMem())
 	r := releaser(b)
 	files := packageFiles(t, reqA.Tag)
-	_, err := r.Publish(ctx, files)
+	_, err := r.Publish(ctx, files, nil)
 	wantErr(t, err, "the state is free")
 	mustLock(t, r, reqA)
-	_, err = r.Publish(ctx, append(files, filepath.Join(t.TempDir(), "x.rpm")))
-	wantErr(t, err, "not a package of any known package type")
-	_, err = r.Publish(ctx, append(files, files[0]))
-	wantErr(t, err, "given twice")
+	for _, tc := range []struct {
+		paths []string
+		only  []string
+		want  string
+	}{
+		{append(files, filepath.Join(t.TempDir(), "x.rpm")), nil, "not a package of any known package type"},
+		{append(files, files[0]), nil, "given twice"},
+		{append(files, "clickhouse-26.3.36.6-amd64.deb"), nil, "given twice"},
+		{[]string{"clickhouse-26.3.36.6-x86_64.deb"}, nil, `unknown architecture "x86_64"`},
+		{[]string{"clickhouse-26.3.36.7-amd64.deb"}, nil, "not version 26.3.36.6"},
+		{[]string{"amd64.deb"}, nil, "no architecture"},
+		{[]string{"-26.3.36.6-amd64.deb"}, nil, "not version"},
+		{files[:1], nil, "no tgz packages"},
+		{packageSet(t, reqA.Tag, []string{"a", "b"}, []string{"amd64", "arm64"})[1:], nil, "deb lacks a amd64"},
+		{nil, nil, "no deb packages"},
+		{files, []string{"deb"}, "a tgz package, but only deb are published"},
+		{files, []string{"rpm"}, "package type rpm not in this build"},
+		{files[1:], []string{"deb", "tgz"}, "no deb packages"},
+	} {
+		_, err = r.Publish(ctx, tc.paths, tc.only)
+		wantErr(t, err, tc.want)
+	}
+	if l := stored2(t, b).Lock; l.State != Locked {
+		t.Fatalf("a refused publish changed the lock: %+v", l)
+	}
 
 	// Live changed by hand before the commit: nothing is copied.
 	setLive(t, b, map[string]string{stableRelease: "changed by hand"})
-	_, err = r.Publish(ctx, files)
+	_, err = r.Publish(ctx, files, nil)
 	wantErr(t, err, "matches neither "+snapX+" nor "+snapA)
 	if got := string(must(b.Get(ctx, "deb/dists/lts/Release"))); got != snapshotBody(t, b, snapX, "deb/dists/lts/Release") {
 		t.Fatalf("lts Release changed: %q", got)
@@ -288,7 +309,7 @@ func must(body []byte, _ store.Object, err error) []byte {
 
 // Once the commit started, the packages must be the ones in assets.
 func TestPublishAfterCommitStarted(t *testing.T) {
-	ctx, b := context.Background(), steady(t, storetest.NewMem())
+	ctx, b := context.Background(), steady(t, newMem())
 	r := releaser(b)
 	mustLock(t, r, reqA)
 	files := packageFiles(t, reqA.Tag)
@@ -297,22 +318,19 @@ func TestPublishAfterCommitStarted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	extra := filepath.Join(t.TempDir(), "extra.deb")
-	if err := os.WriteFile(extra, []byte("extra"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, err = r.Publish(ctx, append(files, extra))
-	wantErr(t, err, "extra.deb has no line in assets")
+	extra := packageSet(t, reqA.Tag, []string{"extra"}, []string{"amd64"})
+	_, err = r.Publish(ctx, append(files, extra...), nil)
+	wantErr(t, err, "extra-26.3.36.6-amd64.deb has no line in assets")
 	changed := filepath.Join(t.TempDir(), filepath.Base(files[0]))
 	if err := os.WriteFile(changed, []byte("changed"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err = r.Publish(ctx, []string{changed, files[1]})
+	_, err = r.Publish(ctx, []string{changed, files[1]}, nil)
 	wantErr(t, err, "differs from deb/")
 
 	// In committing a live file that is neither previous nor the snapshot stops the run.
 	setLive(t, b, map[string]string{stableRelease: "changed by hand"})
-	_, err = r.Publish(ctx, files)
+	_, err = r.Publish(ctx, files, nil)
 	wantErr(t, err, "matches neither")
 
 	// In committed publish recovers whatever differs from the snapshot.
@@ -368,7 +386,7 @@ func TestFirstRelease(t *testing.T) {
 }
 
 func TestUnlock(t *testing.T) {
-	ctx, b := context.Background(), steady(t, storetest.NewMem())
+	ctx, b := context.Background(), steady(t, newMem())
 	r := releaser(b)
 	fakes := seedSnapshots(t, b)
 	_, err := r.Unlock(ctx, reqA.Tag)
@@ -469,7 +487,7 @@ func TestBreakCommitted(t *testing.T) {
 
 // Break on a mix of both snapshots: refused, and with force previous is recorded.
 func TestBreakMix(t *testing.T) {
-	ctx, b := context.Background(), steady(t, storetest.NewMem())
+	ctx, b := context.Background(), steady(t, newMem())
 	r := releaser(b)
 	mustLock(t, r, reqA)
 	mustPublish(t, r, packageFiles(t, reqA.Tag))
@@ -495,12 +513,12 @@ func (s strayType) Stage(ctx context.Context, prev *Previous, tag Tag, pkgs []Pa
 }
 
 func TestPublishBrokenSnapshot(t *testing.T) {
-	ctx, b := context.Background(), steady(t, storetest.NewMem())
+	ctx, b := context.Background(), steady(t, newMem())
 	live := objects(t, b)
 	r := releaser(b)
 	r.Types = []PackageType{strayType{fakeType{"deb"}}, fakeType{"tgz"}}
 	mustLock(t, r, reqA)
-	_, err := r.Publish(ctx, packageFiles(t, reqA.Tag))
+	_, err := r.Publish(ctx, packageFiles(t, reqA.Tag), nil)
 	wantErr(t, err, "snapshot "+snapA+": deb: found 5 metadata files, the manifest has 6")
 	after := objects(t, b)
 	for k, v := range live {
@@ -528,7 +546,7 @@ func (s snapshotPutFails) Put(ctx context.Context, key string, body []byte, opts
 
 // Staging again removes the manifest before it rewrites the snapshot.
 func TestRestageDropsManifest(t *testing.T) {
-	ctx, b := context.Background(), steady(t, storetest.NewMem())
+	ctx, b := context.Background(), steady(t, newMem())
 	r := releaser(b)
 	mustLock(t, r, reqA)
 	files := packageFiles(t, reqA.Tag)
@@ -536,7 +554,7 @@ func TestRestageDropsManifest(t *testing.T) {
 	if _, err := r.setState(ctx, h, Staging); err != nil {
 		t.Fatal(err)
 	}
-	_, err := releaser(snapshotPutFails{b, snapA}).Publish(ctx, files)
+	_, err := releaser(snapshotPutFails{b, snapA}).Publish(ctx, files, nil)
 	wantErr(t, err, "injected")
 	if _, err := b.Head(ctx, ManifestKey(snapA)); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("stale manifest kept: %v", err)
@@ -544,7 +562,7 @@ func TestRestageDropsManifest(t *testing.T) {
 }
 
 func TestCopyKnown(t *testing.T) {
-	ctx, b := context.Background(), storetest.NewMem()
+	ctx, b := context.Background(), newMem()
 	r := releaser(b)
 	obj, err := b.Put(ctx, "src", []byte("body"), store.PutOptions{})
 	if err != nil {

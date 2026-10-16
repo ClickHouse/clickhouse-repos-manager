@@ -15,6 +15,10 @@ func (s *Store) SetAfterPart(fn func(part int32) error) { s.afterPart = fn }
 // SetPartSums installs a hook that may change the checksums sent with each part.
 func (s *Store) SetPartSums(fn func(part int32, sums *hashes.Part)) { s.partSums = fn }
 
+// SetSendHook installs a hook that runs inside every request that sends data,
+// with the number of such requests in flight.
+func (s *Store) SetSendHook(fn func(inFlight int)) { s.sendHook = fn }
+
 // OpenUpload starts a multipart upload of path in parts of partSize with the
 // metadata of opts and sha256, uploads only the given part numbers and leaves
 // the upload open, like a killed run.

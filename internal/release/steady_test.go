@@ -41,11 +41,11 @@ func publishRelease(t *testing.T, b store.Bucket, req LockRequest) {
 
 func mustPublish(t *testing.T, r *Releaser, paths []string) Held {
 	t.Helper()
-	h, err := r.Publish(context.Background(), paths)
+	p, err := r.Publish(context.Background(), paths, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return h
+	return p.Held
 }
 
 // steady seeds the steady state and returns the bucket wrapped so that any
@@ -142,7 +142,7 @@ func TestLockTable(t *testing.T) {
 func TestLockFromFreeLiveChanged(t *testing.T) {
 	for _, name := range []string{"by hand", "back to W", "index deleted"} {
 		t.Run(name, func(t *testing.T) {
-			b := steady(t, storetest.NewMem())
+			b := steady(t, newMem())
 			live := map[string]string{stableRelease: "changed by hand"}
 			switch name {
 			case "back to W":

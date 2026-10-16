@@ -96,10 +96,16 @@ func (r *Releaser) Rollback(ctx context.Context, tag string) (Held, error) {
 	if err != nil {
 		return Held{}, err
 	}
-	for _, line := range lines {
-		if _, err := r.Bucket.DeleteOwned(ctx, line.Key, tag, line.SHA256); err != nil {
-			return Held{}, err
+	// An open upload would complete an object nobody lists any more.
+	err = r.each(ctx, len(lines), func(ctx context.Context, i int) error {
+		if _, err := r.Bucket.AbortUploads(ctx, lines[i].Key); err != nil {
+			return err
 		}
+		_, err := r.Bucket.DeleteOwned(ctx, lines[i].Key, tag, lines[i].SHA256)
+		return err
+	})
+	if err != nil {
+		return Held{}, err
 	}
 	if err := r.deleteSnapshot(ctx, l.Snapshot, true); err != nil {
 		return Held{}, err
@@ -109,16 +115,17 @@ func (r *Releaser) Rollback(ctx context.Context, tag string) (Held, error) {
 }
 
 // restore puts the index metadata back to previous, in reverse commit order.
+// The lock excludes other writers, so the live state is read once up front.
 func (r *Releaser) restore(ctx context.Context, l Lock, prev, m Manifest) error {
 	prevBy := byKey(prev.Files)
+	objs, found, err := r.heads(ctx, m.Files)
+	if err != nil {
+		return err
+	}
 	for i := len(m.Files) - 1; i >= 0; i-- {
 		f := m.Files[i]
 		p, inPrev := prevBy[f.Key]
-		obj, err := r.Bucket.Head(ctx, f.Key)
-		live := err == nil
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return err
-		}
+		obj, live := objs[i], found[i]
 		switch {
 		case inPrev && live && same(obj, p), !inPrev && !live:
 		case live && same(obj, f) && inPrev:

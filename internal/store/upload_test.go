@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/hashes"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/store"
@@ -50,7 +52,7 @@ func writeFile(t *testing.T, size int64, seed uint64) (string, hashes.Sums) {
 }
 
 // readBack streams the object and checks its content and metadata against sums.
-func readBack(t *testing.T, s store.Bucket, key string, sums hashes.Sums, release string) store.Object {
+func readBack(t *testing.T, s *store.Store, key string, sums hashes.Sums, release string) store.Object {
 	t.Helper()
 	body, obj, err := s.Open(context.Background(), key)
 	if err != nil {
@@ -346,6 +348,56 @@ func TestCopyIfAbsent(t *testing.T) {
 }
 
 // openUpload leaves an upload of key open with the metadata PutOptions{Release: "r"} and sha256.
+// Parts, single PUTs and copies share one limit: with UploadConcurrency 2 no
+// more than 2 of them are in flight, however many callers there are.
+func TestSendLimit(t *testing.T) {
+	s, ctx := multipartStore(t), context.Background()
+	var mu sync.Mutex
+	most := 0
+	s.SetSendHook(func(n int) {
+		mu.Lock()
+		most = max(most, n)
+		mu.Unlock()
+		time.Sleep(50 * time.Millisecond) // lets the other callers pile up
+	})
+	path, sums := writeFile(t, 4*partSize, 7)
+	if _, err := s.PutIfAbsent(ctx, "src", []byte("src"), store.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	src, err := s.Head(ctx, "src")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 10)
+	wg.Go(func() {
+		_, err := s.PutFileIfAbsent(ctx, "big", path, sums, store.PutOptions{})
+		errs <- err
+	})
+	for i := range 6 {
+		wg.Go(func() {
+			_, err := s.PutIfAbsent(ctx, fmt.Sprint("small", i), []byte{byte(i)}, store.PutOptions{})
+			errs <- err
+		})
+	}
+	for i := range 2 {
+		wg.Go(func() {
+			_, err := s.CopyIfAbsent(ctx, "src", src.ETag, fmt.Sprint("copy", i), hashes.Bytes([]byte("src")), store.PutOptions{})
+			errs <- err
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if most != 2 {
+		t.Fatalf("at most %d requests in flight, want 2", most)
+	}
+}
+
 func openUpload(t *testing.T, s *store.Store, key, path, sha256 string, partSize int64, parts ...int32) {
 	t.Helper()
 	if err := s.OpenUpload(context.Background(), key, path, partSize, sha256, store.PutOptions{Release: "r"}, parts...); err != nil {

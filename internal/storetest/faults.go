@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"sync"
 	"testing"
 
@@ -138,13 +137,6 @@ func (f *Faults) Get(ctx context.Context, key string) ([]byte, store.Object, err
 		return nil, store.Object{}, err
 	}
 	return f.B.Get(ctx, key)
-}
-
-func (f *Faults) Open(ctx context.Context, key string) (io.ReadCloser, store.Object, error) {
-	if err := f.read("open", key); err != nil {
-		return nil, store.Object{}, err
-	}
-	return f.B.Open(ctx, key)
 }
 
 func (f *Faults) Head(ctx context.Context, key string) (store.Object, error) {

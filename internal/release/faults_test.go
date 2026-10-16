@@ -10,7 +10,7 @@ import (
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/storetest"
 )
 
-func memBucket(*testing.T) store.Bucket { return storetest.NewMem() }
+func memBucket(*testing.T) store.Bucket { return newMem() }
 
 func realBucket(t *testing.T) store.Bucket { return storetest.New(t, config.SnapshotsPrefix) }
 

@@ -2,15 +2,14 @@ package store
 
 import (
 	"context"
-	"io"
 
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/hashes"
 )
 
 // Bucket is what the release protocol needs from a store. Tests wrap it to inject faults.
+// It has no streaming download: the protocol checks objects by their metadata.
 type Bucket interface {
 	Get(ctx context.Context, key string) ([]byte, Object, error)
-	Open(ctx context.Context, key string) (io.ReadCloser, Object, error)
 	Head(ctx context.Context, key string) (Object, error)
 	List(ctx context.Context, prefix string, fn func(Object) error) error
 

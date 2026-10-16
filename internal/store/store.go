@@ -172,6 +172,8 @@ type Store struct {
 	afterPart func(part int32) error
 	// partSums, set only by tests, may change the checksums sent with a part.
 	partSums func(part int32, sums *hashes.Part)
+	// sendHook, set only by tests, runs inside send with the number of requests in flight.
+	sendHook func(inFlight int)
 }
 
 // New creates a Store. Credentials come only from cfg; shared AWS config files are never read.
@@ -246,6 +248,9 @@ func (s *Store) send(ctx context.Context, do func() error) error {
 		return context.Cause(ctx)
 	}
 	defer func() { <-s.sending }()
+	if s.sendHook != nil {
+		s.sendHook(len(s.sending))
+	}
 	return do()
 }
 

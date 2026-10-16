@@ -24,9 +24,29 @@ type fakeType struct{ name string }
 // generation makes every build differ, so no test can rely on a deterministic rebuild.
 var generation atomic.Int64
 
-func (f fakeType) Name() string           { return f.name }
-func (f fakeType) Prefix() string         { return f.name + "/" }
-func (f fakeType) Match(name string) bool { return strings.HasSuffix(name, "."+f.name) }
+func (f fakeType) Name() string               { return f.name }
+func (f fakeType) Prefix() string             { return f.name + "/" }
+func (f fakeType) Indexed() bool              { return true }
+func (f fakeType) Check(pkgs []Package) error { return nil }
+
+// Parse takes <pkg>-<version>-<arch>.<name>.
+func (f fakeType) Parse(name, version string) (pkg, arch string, ok bool, err error) {
+	base, ok := strings.CutSuffix(name, "."+f.name)
+	if !ok {
+		return "", "", false, nil
+	}
+	i := strings.LastIndexByte(base, '-')
+	if i < 0 {
+		return "", "", true, fmt.Errorf("%s: no architecture", name)
+	}
+	if arch = base[i+1:]; arch != "amd64" && arch != "arm64" {
+		return "", "", true, fmt.Errorf("%s: unknown architecture %q", name, arch)
+	}
+	if pkg, ok = strings.CutSuffix(base[:i], "-"+version); !ok || pkg == "" {
+		return "", "", true, fmt.Errorf("%s: not version %s", name, version)
+	}
+	return pkg, arch, true, nil
+}
 
 func (f fakeType) Live(ctx context.Context, b store.Bucket) ([]File, error) {
 	index, _, err := b.Get(ctx, f.Prefix()+"index")
@@ -51,8 +71,10 @@ func (f fakeType) Stage(ctx context.Context, prev *Previous, tag Tag, pkgs []Pac
 	p := f.Prefix()
 	var plan Plan
 	for _, pkg := range pkgs {
-		for _, ch := range tag.Channels {
-			plan.Assets = append(plan.Assets, Asset{Key: p + ch + "/" + pkg.Name, Path: pkg.Path, Sums: pkg.Sums})
+		first := p + tag.Channels[0] + "/" + pkg.Name
+		plan.Assets = append(plan.Assets, Asset{Key: first, Path: pkg.Path, Sums: pkg.Sums})
+		for _, ch := range tag.Channels[1:] {
+			plan.Assets = append(plan.Assets, Asset{Key: p + ch + "/" + pkg.Name, CopyOf: first})
 		}
 	}
 	oldIndex, _, err := prev.Get(ctx, p+"index")
@@ -103,8 +125,14 @@ func (f fakeType) Stage(ctx context.Context, prev *Previous, tag Tag, pkgs []Pac
 	return plan, nil
 }
 
-// packageFiles writes one fake package per package type for the tag's version.
+// packageFiles writes one fake amd64 package per package type for the tag's version.
 func packageFiles(t *testing.T, tag string) []string {
+	t.Helper()
+	return packageSet(t, tag, []string{"clickhouse"}, []string{"amd64"})
+}
+
+// packageSet writes a fake package per package type, package and architecture.
+func packageSet(t *testing.T, tag string, pkgs, archs []string) []string {
 	t.Helper()
 	tg, err := ParseTag(tag)
 	if err != nil {
@@ -113,11 +141,20 @@ func packageFiles(t *testing.T, tag string) []string {
 	dir := t.TempDir()
 	var paths []string
 	for _, pt := range types {
-		path := filepath.Join(dir, "clickhouse-"+tg.Version()+"."+pt.Name())
-		if err := os.WriteFile(path, []byte(pt.Name()+" "+tg.Version()+"\n"), 0o644); err != nil {
-			t.Fatal(err)
+		for _, pkg := range pkgs {
+			for _, arch := range archs {
+				paths = append(paths, writePackage(t, dir, pkg+"-"+tg.Version()+"-"+arch+"."+pt.Name()))
+			}
 		}
-		paths = append(paths, path)
 	}
 	return paths
+}
+
+func writePackage(t *testing.T, dir, name string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("package "+name+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

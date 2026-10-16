@@ -6,7 +6,6 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"sort"
 	"strings"
@@ -48,14 +47,6 @@ func (m *Mem) Get(_ context.Context, key string) ([]byte, store.Object, error) {
 		return nil, store.Object{}, fmt.Errorf("get %s: %w", key, store.ErrNotFound)
 	}
 	return bytes.Clone(o.body), o.obj, nil
-}
-
-func (m *Mem) Open(ctx context.Context, key string) (io.ReadCloser, store.Object, error) {
-	b, o, err := m.Get(ctx, key)
-	if err != nil {
-		return nil, o, err
-	}
-	return io.NopCloser(bytes.NewReader(b)), o, nil
 }
 
 func (m *Mem) Head(ctx context.Context, key string) (store.Object, error) {
@@ -141,6 +132,16 @@ func (m *Mem) PutIfMatch(_ context.Context, key, etag string, body []byte, opts 
 
 func (m *Mem) Put(_ context.Context, key string, body []byte, opts store.PutOptions) (store.Object, error) {
 	return m.put(key, body, opts, "", nil)
+}
+
+// PutForeign writes an object as another tool did: without the SHA256
+// metadata and the stamp, as every production object before ch-deploy.
+func (m *Mem) PutForeign(key string, body []byte) {
+	o, _ := m.put(key, body, store.PutOptions{}, "", nil)
+	o.SHA256 = ""
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.objs[key] = memObject{obj: o, body: bytes.Clone(body)}
 }
 
 func (m *Mem) PutFileIfAbsent(_ context.Context, key, path string, _ hashes.Sums, opts store.PutOptions) (store.Object, error) {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -18,8 +19,16 @@ type PackageType interface {
 	Name() string
 	// Prefix is the public key prefix, for example "deb/".
 	Prefix() string
-	// Match claims an input package by its file name.
-	Match(name string) bool
+	// Parse claims an input package by its file name: ok when the name is of
+	// this package type, err when it is but does not parse for version (another
+	// version, an unknown architecture). Architectures are amd64 and arm64.
+	Parse(name, version string) (pkg, arch string, ok bool, err error)
+	// Indexed reports whether the package type has index metadata. Without
+	// it (TGZ) adopt finds nothing to adopt, and objects under Prefix are fine.
+	Indexed() bool
+	// Check validates the packages of a release together, before anything is
+	// written.
+	Check(packages []Package) error
 	// Stage builds the assets and the index metadata of a release on top of
 	// previous. It returns only the index metadata it builds; the snapshot takes
 	// every other key from previous.
@@ -38,6 +47,14 @@ type Releaser struct {
 	Version string
 	// Now defaults to time.Now.
 	Now func() time.Time
+	// Concurrency is the number of uploads, copies and read only checks run at
+	// once. Default store.DefaultUploadConcurrency.
+	Concurrency int
+	// PublicURL is the public base URL of the keys; publish checks the
+	// packages there when it is set.
+	PublicURL string
+	// HTTP defaults to a client with a timeout.
+	HTTP *http.Client
 }
 
 // Held is the lock as last written or read, with its ETag for the next conditional write.
@@ -209,14 +226,15 @@ func (r *Releaser) manifest(ctx context.Context, snapshot string) (Manifest, err
 
 // diffLive lists the live files that are missing or differ from the manifest.
 func (r *Releaser) diffLive(ctx context.Context, m Manifest) ([]string, error) {
+	objs, found, err := r.heads(ctx, m.Files)
+	if err != nil {
+		return nil, err
+	}
 	var diff []string
-	for _, f := range m.Files {
-		obj, err := r.Bucket.Head(ctx, f.Key)
-		switch {
-		case errors.Is(err, store.ErrNotFound):
+	for i, f := range m.Files {
+		switch obj := objs[i]; {
+		case !found[i]:
 			diff = append(diff, f.Key+": missing")
-		case err != nil:
-			return nil, err
 		case obj.ETag != f.ETag || obj.Size != f.Size:
 			diff = append(diff, fmt.Sprintf("%s: etag %s size %d, snapshot has etag %s size %d", f.Key, obj.ETag, obj.Size, f.ETag, f.Size))
 		}
@@ -241,6 +259,9 @@ func (r *Releaser) adopt(ctx context.Context) error {
 			return fmt.Errorf("adopt %s: %w", t.Name(), err)
 		}
 		if len(live) == 0 {
+			if !t.Indexed() {
+				continue
+			}
 			var first string
 			err := r.Bucket.List(ctx, t.Prefix(), func(o store.Object) error { first = o.Key; return errStop })
 			if err != nil && !errors.Is(err, errStop) {
