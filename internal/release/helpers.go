@@ -212,6 +212,12 @@ func (view) CopyIfSourceMatch(context.Context, string, string, string) (store.Ob
 	return store.Object{}, errView
 }
 
+func (view) CopyIfAbsent(context.Context, string, string, string, hashes.Sums, store.PutOptions) (store.Object, error) {
+	return store.Object{}, errView
+}
+
+func (view) AbortUploads(context.Context, string) (int, error) { return 0, errView }
+
 func (view) Delete(context.Context, string) error { return errView }
 
 func (view) DeleteOwned(context.Context, string, string, string) (store.DeleteResult, error) {

@@ -3,8 +3,12 @@ package storetest
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/ClickHouse/clickhouse-repos-manager/internal/hashes"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/store"
 )
 
@@ -89,6 +93,38 @@ func TestMemBucketPutIfMatch(t *testing.T) {
 	}
 	if _, err := m.PutIfMatch(ctx, "a", a.ETag, []byte("3"), store.PutOptions{}); !errors.Is(err, store.ErrPrecondition) || a.ETag == b.ETag {
 		t.Fatalf("stale etag: %v, etags %s %s", err, a.ETag, b.ETag)
+	}
+}
+
+// Mem gives files above PartSize a multipart ETag, which a copy to another key
+// replaces with the MD5, as R2 does; a copy onto the same key keeps it.
+func TestMemMultipartETag(t *testing.T) {
+	ctx, m := context.Background(), NewMem()
+	m.PartSize = 5
+	path := filepath.Join(t.TempDir(), "f")
+	body := []byte("0123456789a")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sums := hashes.Bytes(body)
+	src, err := m.PutFileIfAbsent(ctx, "a", path, sums, store.PutOptions{Release: "r"})
+	if err != nil || !strings.HasSuffix(src.ETag, `-3"`) || src.CRC64NVME != sums.CRC64NVME {
+		t.Fatalf("upload %+v, %v", src, err)
+	}
+	self, err := m.CopyIfSourceMatch(ctx, "a", src.ETag, "a")
+	if err != nil || self.ETag != src.ETag {
+		t.Fatalf("copy onto itself %+v, %v", self, err)
+	}
+	other, err := m.CopyIfSourceMatch(ctx, "a", src.ETag, "b")
+	if err != nil || other.ETag != `"`+sums.MD5+`"` || other.Release != "r" {
+		t.Fatalf("copy to another key %+v, %v", other, err)
+	}
+	c, err := m.CopyIfAbsent(ctx, "a", src.ETag, "c", sums, store.PutOptions{Release: "s"})
+	if err != nil || c.ETag != `"`+sums.MD5+`"` || c.Release != "s" || c.SHA256 != sums.SHA256 || c.CRC64NVME != sums.CRC64NVME {
+		t.Fatalf("copy if absent %+v, %v", c, err)
+	}
+	if _, err := m.CopyIfAbsent(ctx, "a", src.ETag, "c", sums, store.PutOptions{}); !errors.Is(err, store.ErrPrecondition) {
+		t.Fatalf("copy if absent over c: %v", err)
 	}
 }
 

@@ -186,6 +186,16 @@ func (f *Faults) CopyIfSourceMatch(ctx context.Context, src, srcETag, dst string
 	return obj, err
 }
 
+func (f *Faults) CopyIfAbsent(ctx context.Context, src, srcETag, dst string, sums hashes.Sums, opts store.PutOptions) (obj store.Object, err error) {
+	err = f.mutate("copy if absent "+src+" to", dst, func() (e error) { obj, e = f.B.CopyIfAbsent(ctx, src, srcETag, dst, sums, opts); return })
+	return obj, err
+}
+
+func (f *Faults) AbortUploads(ctx context.Context, key string) (n int, err error) {
+	err = f.mutate("abort uploads", key, func() (e error) { n, e = f.B.AbortUploads(ctx, key); return })
+	return n, err
+}
+
 func (f *Faults) Delete(ctx context.Context, key string) error {
 	return f.mutate("delete", key, func() error { return f.B.Delete(ctx, key) })
 }

@@ -44,7 +44,8 @@ func FromEnv() (Env, bool) {
 	return e, e.Endpoint != "" && e.Bucket != ""
 }
 
-// Config is the store configuration for prefix.
+// Config is the store configuration for prefix. Miniflare cannot list
+// multipart uploads, so there uploads are not resumed.
 func (e Env) Config(prefix string) store.Config {
 	return store.Config{
 		Endpoint:        e.Endpoint,
@@ -52,6 +53,7 @@ func (e Env) Config(prefix string) store.Config {
 		Prefix:          prefix,
 		AccessKeyID:     e.AccessKeyID,
 		SecretAccessKey: e.SecretAccessKey,
+		NoResumeUploads: Backend() == "miniflare",
 	}
 }
 
@@ -155,7 +157,8 @@ func NewPrefix(t testing.TB) (Env, string) {
 	return env, prefix
 }
 
-// Purge deletes every object under prefix, which must be below store.TestPrefix.
+// Purge deletes every object under prefix, which must be below store.TestPrefix,
+// and aborts the open multipart uploads there.
 func Purge(ctx context.Context, env Env, prefix string) (int, error) {
 	if err := CheckRunPrefix(prefix); err != nil {
 		return 0, err
@@ -163,6 +166,17 @@ func Purge(ctx context.Context, env Env, prefix string) (int, error) {
 	s, err := env.Store(prefix, true)
 	if err != nil {
 		return 0, err
+	}
+	if Backend() != "miniflare" {
+		uploads, err := s.OpenUploads(ctx, "")
+		if err != nil {
+			return 0, err
+		}
+		for _, k := range uploads {
+			if _, err := s.AbortUploads(ctx, k); err != nil {
+				return 0, err
+			}
+		}
 	}
 	var keys []string
 	if err := s.List(ctx, "", func(o store.Object) error { keys = append(keys, o.Key); return nil }); err != nil {

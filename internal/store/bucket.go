@@ -19,6 +19,8 @@ type Bucket interface {
 	Put(ctx context.Context, key string, body []byte, opts PutOptions) (Object, error)
 	PutFileIfAbsent(ctx context.Context, key, path string, sums hashes.Sums, opts PutOptions) (Object, error)
 	CopyIfSourceMatch(ctx context.Context, src, srcETag, dst string) (Object, error)
+	CopyIfAbsent(ctx context.Context, src, srcETag, dst string, sums hashes.Sums, opts PutOptions) (Object, error)
+	AbortUploads(ctx context.Context, key string) (int, error)
 	Delete(ctx context.Context, key string) error
 	DeleteOwned(ctx context.Context, key, release, sha256 string) (DeleteResult, error)
 }

@@ -76,18 +76,25 @@ type Config struct {
 	DeleteAnyKey bool
 	// PartSize is the multipart part size; files up to it go in one PUT. Default DefaultPartSize.
 	PartSize int64
-	// UploadConcurrency is the number of parts uploaded in parallel. Default DefaultUploadConcurrency.
+	// UploadConcurrency limits the requests that send data (parts, single PUTs,
+	// copies) in flight at once. Default DefaultUploadConcurrency.
 	UploadConcurrency int
+	// NoResumeUploads is for buckets without ListMultipartUploads and ListParts
+	// (Miniflare): a failed multipart upload is aborted instead of kept for a rerun.
+	NoResumeUploads bool
 }
 
 // Object describes a stored object.
 type Object struct {
-	Key          string
-	Size         int64
-	ETag         string
-	SHA256       string // hex, from MetaSHA256; empty for objects not written by this tool
-	SHA512       string // hex, from MetaSHA512
-	Release      string // the stamp, from MetaRelease
+	Key     string
+	Size    int64
+	ETag    string
+	SHA256  string // hex, from MetaSHA256; empty for objects not written by this tool
+	SHA512  string // hex, from MetaSHA512
+	Release string // the stamp, from MetaRelease
+	// CRC64NVME is the hex full object checksum from Head; R2 keeps one for
+	// every object, Miniflare none.
+	CRC64NVME    string
 	ContentType  string
 	CacheControl string
 }
@@ -158,8 +165,13 @@ type Store struct {
 	deletable         []string
 	partSize          int64
 	uploadConcurrency int
+	resume            bool
+	// sending holds a token for every request in flight that sends data.
+	sending chan struct{}
 	// afterPart, set only by tests, runs after each uploaded part and can fail the upload.
 	afterPart func(part int32) error
+	// partSums, set only by tests, may change the checksums sent with a part.
+	partSums func(part int32, sums *hashes.Part)
 }
 
 // New creates a Store. Credentials come only from cfg; shared AWS config files are never read.
@@ -219,7 +231,22 @@ func New(cfg Config) (*Store, error) {
 			o.Retryables = append(o.Retryables, retry.RetryableErrorCode{Codes: map[string]struct{}{"ServiceUnavailable": {}}})
 		}),
 	})
-	return &Store{client: client, bucket: cfg.Bucket, prefix: prefix, deletable: deletable, partSize: partSize, uploadConcurrency: concurrency}, nil
+	return &Store{
+		client: client, bucket: cfg.Bucket, prefix: prefix, deletable: deletable,
+		partSize: partSize, uploadConcurrency: concurrency, resume: !cfg.NoResumeUploads,
+		sending: make(chan struct{}, concurrency),
+	}, nil
+}
+
+// send runs a request that sends data within the UploadConcurrency limit.
+func (s *Store) send(ctx context.Context, do func() error) error {
+	select {
+	case s.sending <- struct{}{}:
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
+	defer func() { <-s.sending }()
+	return do()
 }
 
 // Ping checks that the bucket is reachable with the configured credentials.
@@ -258,13 +285,19 @@ func (s *Store) Open(ctx context.Context, key string) (io.ReadCloser, Object, er
 	return out.Body, object(key, out.ContentLength, out.ETag, out.Metadata, out.ContentType, out.CacheControl), nil
 }
 
-// Head returns the attributes of an object.
+// Head returns the attributes of an object, with its CRC64NVME when the bucket keeps one.
 func (s *Store) Head(ctx context.Context, key string) (Object, error) {
-	out, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &s.bucket, Key: s.full(key)})
+	out, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &s.bucket, Key: s.full(key), ChecksumMode: types.ChecksumModeEnabled})
 	if err != nil {
 		return Object{}, s.wrap("head", key, err)
 	}
-	return object(key, out.ContentLength, out.ETag, out.Metadata, out.ContentType, out.CacheControl), nil
+	obj := object(key, out.ContentLength, out.ETag, out.Metadata, out.ContentType, out.CacheControl)
+	if c := aws.ToString(out.ChecksumCRC64NVME); c != "" {
+		if obj.CRC64NVME, err = hashes.Hex(c); err != nil {
+			return Object{}, fmt.Errorf("head %s: %w", key, err)
+		}
+	}
+	return obj, nil
 }
 
 func object(key string, size *int64, etag *string, meta map[string]string, contentType, cacheControl *string) Object {
@@ -303,20 +336,25 @@ func (s *Store) put(ctx context.Context, key string, body []byte, opts PutOption
 	return s.putObject(ctx, key, bytes.NewReader(body), hashes.Bytes(body), opts, cond)
 }
 
-// putObject sends one PutObject with a SHA256 checksum, which R2 verifies.
-// R2 rejects Content-MD5 next to it, so Miniflare, which checks only MD5, verifies nothing here.
+// putObject sends one PutObject with Content-MD5 and CRC64NVME from sums.
+// R2 verifies both, Miniflare only the MD5.
 func (s *Store) putObject(ctx context.Context, key string, body io.ReadSeeker, sums hashes.Sums, opts PutOptions, cond func(*s3.PutObjectInput)) (Object, error) {
-	sha256, err := hashes.Base64(sums.SHA256)
+	md5, err := hashes.Base64(sums.MD5)
+	if err != nil {
+		return Object{}, fmt.Errorf("put %s: %w", key, err)
+	}
+	crc, err := hashes.Base64(sums.CRC64NVME)
 	if err != nil {
 		return Object{}, fmt.Errorf("put %s: %w", key, err)
 	}
 	in := &s3.PutObjectInput{
-		Bucket:         &s.bucket,
-		Key:            s.full(key),
-		Body:           body,
-		ContentLength:  aws.Int64(sums.Size),
-		ChecksumSHA256: aws.String(sha256),
-		Metadata:       opts.metadata(sums.SHA256),
+		Bucket:            &s.bucket,
+		Key:               s.full(key),
+		Body:              body,
+		ContentLength:     aws.Int64(sums.Size),
+		ContentMD5:        aws.String(md5),
+		ChecksumCRC64NVME: aws.String(crc),
+		Metadata:          opts.metadata(sums.SHA256),
 	}
 	if opts.ContentType != "" {
 		in.ContentType = aws.String(opts.ContentType)
@@ -327,7 +365,8 @@ func (s *Store) putObject(ctx context.Context, key string, body io.ReadSeeker, s
 	if cond != nil {
 		cond(in)
 	}
-	out, err := s.client.PutObject(ctx, in)
+	var out *s3.PutObjectOutput
+	err = s.send(ctx, func() (e error) { out, e = s.client.PutObject(ctx, in); return })
 	if err != nil {
 		return Object{}, s.wrap("put", key, err)
 	}
@@ -342,13 +381,48 @@ func (s *Store) CopyIfSourceMatch(ctx context.Context, src, srcETag, dst string)
 	if srcETag == "" {
 		return Object{}, errors.New("copy: empty source etag")
 	}
-	_, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
-		Bucket:            &s.bucket,
-		Key:               s.full(dst),
-		CopySource:        aws.String(copySource(s.bucket, *s.full(src))),
+	return s.copy(ctx, src, dst, &s3.CopyObjectInput{
 		CopySourceIfMatch: aws.String(srcETag),
 		MetadataDirective: types.MetadataDirectiveCopy,
 	})
+}
+
+// CopyIfAbsent copies src to a new key dst server side, only if src still has
+// srcETag, with the metadata of opts and sums instead of those of src.
+//
+// R2 ignores conditions on the destination, so a HEAD decides that dst is
+// absent; ErrPrecondition when it exists. The global lock excludes other
+// writers in between. A copy to another key turns a multipart object into a
+// single part one, so the ETag of dst differs from srcETag.
+func (s *Store) CopyIfAbsent(ctx context.Context, src, srcETag, dst string, sums hashes.Sums, opts PutOptions) (Object, error) {
+	if srcETag == "" {
+		return Object{}, errors.New("copy: empty source etag")
+	}
+	switch _, err := s.Head(ctx, dst); {
+	case err == nil:
+		return Object{}, fmt.Errorf("copy %s to %s: exists: %w", src, dst, ErrPrecondition)
+	case !errors.Is(err, ErrNotFound):
+		return Object{}, err
+	}
+	in := &s3.CopyObjectInput{
+		CopySourceIfMatch: aws.String(srcETag),
+		MetadataDirective: types.MetadataDirectiveReplace,
+		Metadata:          opts.metadata(sums.SHA256),
+	}
+	if opts.ContentType != "" {
+		in.ContentType = aws.String(opts.ContentType)
+	}
+	if opts.CacheControl != "" {
+		in.CacheControl = aws.String(opts.CacheControl)
+	}
+	return s.copy(ctx, src, dst, in)
+}
+
+func (s *Store) copy(ctx context.Context, src, dst string, in *s3.CopyObjectInput) (Object, error) {
+	in.Bucket = &s.bucket
+	in.Key = s.full(dst)
+	in.CopySource = aws.String(copySource(s.bucket, *s.full(src)))
+	err := s.send(ctx, func() error { _, e := s.client.CopyObject(ctx, in); return e })
 	if err != nil {
 		return Object{}, s.wrap("copy "+src+" to", dst, err)
 	}

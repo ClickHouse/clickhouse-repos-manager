@@ -3,11 +3,13 @@ package store_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/hashes"
@@ -126,41 +128,128 @@ func TestPutFileIfAbsentChecksSize(t *testing.T) {
 }
 
 func TestPutFileIfAbsentBadDigest(t *testing.T) {
-	storetest.SkipOnMiniflare(t, "does not verify x-amz-checksum-sha256")
-	s, ctx := storetest.New(t), context.Background()
-	path, sums := writeFile(t, 100, 1)
-	sums.SHA256 = hashes.Bytes([]byte("other")).SHA256
-	_, err := s.PutFileIfAbsent(ctx, "f", path, sums, store.PutOptions{})
-	if err == nil || !strings.Contains(err.Error(), "BadDigest") {
-		t.Fatalf("upload with a wrong SHA256: %v, want BadDigest", err)
-	}
-	if _, err := s.Head(ctx, "f"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("object written: %v", err)
+	other := hashes.Bytes([]byte("other"))
+	for _, tc := range []struct {
+		name   string
+		size   int64
+		r2Only bool
+		sums   func(*hashes.Sums)
+		part   func(*hashes.Part)
+	}{
+		{name: "single-md5", size: 100, sums: func(s *hashes.Sums) { s.MD5 = other.MD5 }},
+		{name: "single-crc", size: 100, r2Only: true, sums: func(s *hashes.Sums) { s.CRC64NVME = other.CRC64NVME }},
+		{name: "part-md5", size: 2 * partSize, part: func(p *hashes.Part) { p.MD5 = other.MD5 }},
+		{name: "part-crc", size: 2 * partSize, r2Only: true, part: func(p *hashes.Part) { p.CRC64NVME = other.CRC64NVME }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.r2Only {
+				storetest.SkipOnMiniflare(t, "does not verify x-amz-checksum-crc64nvme")
+			}
+			s, ctx := multipartStore(t), context.Background()
+			path, sums := writeFile(t, tc.size, 1)
+			if tc.sums != nil {
+				tc.sums(&sums)
+			}
+			if tc.part != nil {
+				s.SetPartSums(func(n int32, p *hashes.Part) {
+					if n == 2 {
+						tc.part(p)
+					}
+				})
+			}
+			_, err := s.PutFileIfAbsent(ctx, "f", path, sums, store.PutOptions{})
+			if err == nil || !strings.Contains(err.Error(), "BadDigest") {
+				t.Fatalf("upload with a wrong checksum: %v, want BadDigest", err)
+			}
+			if _, err := s.Head(ctx, "f"); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("object written: %v", err)
+			}
+		})
 	}
 }
 
-func TestMultipartFailureAborts(t *testing.T) {
+// R2 keeps a full object CRC64NVME for every object, single PUT or multipart.
+func TestHeadCRC64NVME(t *testing.T) {
 	s, ctx := multipartStore(t), context.Background()
-	path, sums := writeFile(t, 3*partSize, 2)
-	boom := errors.New("boom")
+	for i, size := range []int64{100, 2*partSize + 1} {
+		path, sums := writeFile(t, size, uint64(i))
+		key := fmt.Sprint("f", i)
+		if _, err := s.PutFileIfAbsent(ctx, key, path, sums, store.PutOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		obj, err := s.Head(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := sums.CRC64NVME
+		if storetest.Backend() == "miniflare" {
+			want = ""
+		}
+		if obj.CRC64NVME != want {
+			t.Fatalf("%d bytes: CRC64NVME %q, want %q", size, obj.CRC64NVME, want)
+		}
+	}
+}
+
+// countParts makes the store count its uploaded parts and fail after part failAfter (0 never).
+func countParts(s *store.Store, failAfter int32, fail error) *atomic.Int32 {
+	var n atomic.Int32
 	s.SetAfterPart(func(part int32) error {
-		if part == 2 {
-			return boom
+		n.Add(1)
+		if part == failAfter {
+			return fail
 		}
 		return nil
 	})
-	if _, err := s.PutFileIfAbsent(ctx, "f", path, sums, store.PutOptions{}); !errors.Is(err, boom) {
+	return &n
+}
+
+// serialStore uploads one part at a time, so the parts sent before a failure are known.
+func serialStore(t *testing.T) *store.Store {
+	return storetest.NewConfig(t, func(c *store.Config) {
+		c.PartSize = partSize
+		c.UploadConcurrency = 1
+	})
+}
+
+// A failed upload stays open on R2, and the rerun sends only the missing parts.
+// Miniflare aborts it, and the rerun sends every part.
+func TestMultipartResumeAfterFailure(t *testing.T) {
+	s, ctx := serialStore(t), context.Background()
+	path, sums := writeFile(t, 3*partSize, 2)
+	boom := errors.New("boom")
+	countParts(s, 2, boom)
+	if _, err := s.PutFileIfAbsent(ctx, "f", path, sums, store.PutOptions{Release: "r"}); !errors.Is(err, boom) {
 		t.Fatalf("upload: %v, want the part failure", err)
 	}
 	if _, err := s.Head(ctx, "f"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("object written: %v", err)
 	}
-	storetest.SkipOnMiniflare(t, "ListMultipartUploads is not implemented")
-	noOpenUploads(t, s)
+	if storetest.Backend() != "miniflare" {
+		if keys, err := s.OpenUploads(ctx, ""); err != nil || len(keys) != 1 {
+			t.Fatalf("open uploads %q, %v, want one", keys, err)
+		}
+	}
+	sent := countParts(s, 0, nil)
+	if _, err := s.PutFileIfAbsent(ctx, "f", path, sums, store.PutOptions{Release: "r"}); err != nil {
+		t.Fatal(err)
+	}
+	readBack(t, s, "f", sums, "r")
+	want := int32(1)
+	if storetest.Backend() == "miniflare" {
+		want = 3
+	}
+	if sent.Load() != want {
+		t.Fatalf("rerun sent %d parts, want %d", sent.Load(), want)
+	}
+	if storetest.Backend() != "miniflare" {
+		noOpenUploads(t, s)
+	}
 }
 
-func TestMultipartCancelAborts(t *testing.T) {
-	s := multipartStore(t)
+func TestMultipartResumeAfterCancel(t *testing.T) {
+	storetest.SkipOnMiniflare(t, "ListMultipartUploads is not implemented")
+	s := serialStore(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	path, sums := writeFile(t, 3*partSize, 3)
@@ -168,11 +257,118 @@ func TestMultipartCancelAborts(t *testing.T) {
 	if _, err := s.PutFileIfAbsent(ctx, "f", path, sums, store.PutOptions{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("upload: %v, want context.Canceled", err)
 	}
-	if _, err := s.Head(context.Background(), "f"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("object written: %v", err)
+	sent := countParts(s, 0, nil)
+	if _, err := s.PutFileIfAbsent(context.Background(), "f", path, sums, store.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	readBack(t, s, "f", sums, "")
+	if sent.Load() != 2 {
+		t.Fatalf("rerun sent %d parts, want 2", sent.Load())
+	}
+	noOpenUploads(t, s)
+}
+
+// Open uploads left by earlier runs: the one with the most matching parts goes on,
+// uploads with another part size or other content give nothing, and the rest is aborted.
+func TestMultipartResumeChoice(t *testing.T) {
+	storetest.SkipOnMiniflare(t, "ListMultipartUploads is not implemented")
+	for _, tc := range []struct {
+		name string
+		open func(t *testing.T, s *store.Store, path, sha256 string)
+		sent int32
+	}{
+		{"most-parts", func(t *testing.T, s *store.Store, path, sha256 string) {
+			openUpload(t, s, "f", path, sha256, partSize, 1)
+			openUpload(t, s, "f", path, sha256, partSize, 1, 2)
+			openUpload(t, s, "f", path, sha256, partSize, 3)
+		}, 1},
+		{"other-part-size", func(t *testing.T, s *store.Store, path, sha256 string) {
+			openUpload(t, s, "f", path, sha256, partSize+1<<20, 1)
+		}, 3},
+		{"other-content", func(t *testing.T, s *store.Store, _, sha256 string) {
+			other, _ := writeFile(t, 3*partSize, 99)
+			openUpload(t, s, "f", other, sha256, partSize, 1, 2, 3)
+		}, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, ctx := serialStore(t), context.Background()
+			path, sums := writeFile(t, 3*partSize, 4)
+			tc.open(t, s, path, sums.SHA256)
+			sent := countParts(s, 0, nil)
+			if _, err := s.PutFileIfAbsent(ctx, "f", path, sums, store.PutOptions{Release: "r"}); err != nil {
+				t.Fatal(err)
+			}
+			readBack(t, s, "f", sums, "r")
+			if sent.Load() != tc.sent {
+				t.Fatalf("sent %d parts, want %d", sent.Load(), tc.sent)
+			}
+			noOpenUploads(t, s)
+		})
+	}
+}
+
+// The LTS copy of a package: a multipart source becomes a single part object
+// with the metadata given, and an existing destination stays.
+func TestCopyIfAbsent(t *testing.T) {
+	s, ctx := multipartStore(t), context.Background()
+	path, sums := writeFile(t, 2*partSize+1, 6)
+	src, err := s.PutFileIfAbsent(ctx, "tgz/lts/f.tgz", path, sums, store.PutOptions{Release: "other", ContentType: "text/plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := store.PutOptions{Release: "r", ContentType: "application/gzip", SHA512: sums.SHA512}
+	dst, err := s.CopyIfAbsent(ctx, "tgz/lts/f.tgz", src.ETag, "tgz/stable/f.tgz", sums, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := readBack(t, s, "tgz/stable/f.tgz", sums, "r")
+	if dst.Size != sums.Size || dst.Release != "r" || dst.SHA256 != sums.SHA256 || dst.SHA512 != sums.SHA512 || got.ContentType != opts.ContentType {
+		t.Fatalf("copy attributes %+v", dst)
+	}
+	if storetest.Backend() != "miniflare" {
+		if dst.ETag != `"`+sums.MD5+`"` || dst.CRC64NVME != sums.CRC64NVME {
+			t.Fatalf("copy etag %s crc %s, want the MD5 %s and crc %s (source etag %s)", dst.ETag, dst.CRC64NVME, sums.MD5, sums.CRC64NVME, src.ETag)
+		}
+	}
+
+	if _, err := s.PutIfAbsent(ctx, "tgz/stable/g.tgz", []byte("g"), store.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CopyIfAbsent(ctx, "tgz/lts/f.tgz", src.ETag, "tgz/stable/g.tgz", sums, opts); !errors.Is(err, store.ErrPrecondition) {
+		t.Fatalf("copy over an existing key: %v, want ErrPrecondition", err)
+	}
+	if body, _, err := s.Get(ctx, "tgz/stable/g.tgz"); err != nil || string(body) != "g" {
+		t.Fatalf("existing destination changed: %q, %v", body, err)
+	}
+	if _, err := s.CopyIfAbsent(ctx, "tgz/lts/f.tgz", `"00000000000000000000000000000000"`, "tgz/stable/h.tgz", sums, opts); !errors.Is(err, store.ErrPrecondition) {
+		t.Fatalf("stale source copy: %v, want ErrPrecondition", err)
+	}
+}
+
+// openUpload leaves an upload of key open with the metadata PutOptions{Release: "r"} and sha256.
+func openUpload(t *testing.T, s *store.Store, key, path, sha256 string, partSize int64, parts ...int32) {
+	t.Helper()
+	if err := s.OpenUpload(context.Background(), key, path, partSize, sha256, store.PutOptions{Release: "r"}, parts...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAbortUploads(t *testing.T) {
+	s, ctx := serialStore(t), context.Background()
+	if n, err := s.AbortUploads(ctx, "f"); err != nil || n != 0 {
+		t.Fatalf("AbortUploads without uploads = %d, %v", n, err)
 	}
 	storetest.SkipOnMiniflare(t, "ListMultipartUploads is not implemented")
-	noOpenUploads(t, s)
+	path, _ := writeFile(t, 2*partSize, 5)
+	for _, key := range []string{"f", "f", "f2"} {
+		openUpload(t, s, key, path, "", partSize, 1)
+	}
+	if n, err := s.AbortUploads(ctx, "f"); err != nil || n != 2 {
+		t.Fatalf("AbortUploads = %d, %v, want 2", n, err)
+	}
+	if keys, err := s.OpenUploads(ctx, ""); err != nil || len(keys) != 1 || keys[0] != "f2" {
+		t.Fatalf("open uploads %q, %v, want only f2", keys, err)
+	}
 }
 
 // A writer that creates the key between the HEAD check and the completion loses nothing.
