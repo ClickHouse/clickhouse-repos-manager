@@ -10,47 +10,98 @@ import (
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/store"
 )
 
+// Unlocked is the result of Unlock.
+type Unlocked struct {
+	Held   Held
+	Pruned []Pruned
+}
+
 // Unlock ends a committed release after the client tests passed: it prunes old
-// snapshots, freezes the tag and frees the lock.
-func (r *Releaser) Unlock(ctx context.Context, tag string) (Held, error) {
+// snapshots and the content named metadata they alone referenced, freezes the
+// tag and frees the lock.
+func (r *Releaser) Unlock(ctx context.Context, tag string) (Unlocked, error) {
 	cur, err := r.held(ctx, tag)
 	if err != nil {
-		return Held{}, err
+		return Unlocked{}, err
 	}
 	l := cur.Lock
 	if l.State != Committed {
-		return Held{}, fmt.Errorf("unlock needs state %s, the state is %s; end this release with rollback", Committed, l.State)
+		return Unlocked{}, fmt.Errorf("unlock needs state %s, the state is %s; end this release with rollback", Committed, l.State)
 	}
 	m, err := r.manifest(ctx, l.Snapshot)
 	if err != nil {
-		return Held{}, err
+		return Unlocked{}, err
 	}
 	if diff, err := r.diffLive(ctx, m); err != nil {
-		return Held{}, err
+		return Unlocked{}, err
 	} else if len(diff) > 0 {
-		return Held{}, fmt.Errorf("live metadata differs from snapshot %s; run publish again to recover:\n  %s", l.Snapshot, strings.Join(diff, "\n  "))
+		return Unlocked{}, fmt.Errorf("live metadata differs from snapshot %s; run publish again to recover:\n  %s", l.Snapshot, strings.Join(diff, "\n  "))
 	}
 	names, err := r.snapshots(ctx)
 	if err != nil {
-		return Held{}, err
+		return Unlocked{}, err
 	}
 	for i, name := range names {
 		if i >= len(names)-config.SnapshotRetention || name == l.Snapshot || name == l.Previous {
 			continue
 		}
 		if err := r.deleteSnapshot(ctx, name, false); err != nil {
-			return Held{}, fmt.Errorf("prune %s: %w", name, err)
+			return Unlocked{}, fmt.Errorf("prune %s: %w", name, err)
 		}
+	}
+	pruned, err := r.prune(ctx)
+	if err != nil {
+		return Unlocked{}, err
 	}
 	obj, err := r.Bucket.Head(ctx, ManifestKey(l.Snapshot))
 	if err != nil {
-		return Held{}, err
+		return Unlocked{}, err
 	}
 	mf := File{Key: ManifestKey(l.Snapshot), Size: obj.Size, ETag: obj.ETag, SHA256: obj.SHA256}
 	if err := r.copyKnown(ctx, mf.Key, ReleasedKey(tag), mf); err != nil {
-		return Held{}, err
+		return Unlocked{}, err
 	}
-	return r.setState(ctx, cur, Free)
+	held, err := r.setState(ctx, cur, Free)
+	return Unlocked{Held: held, Pruned: pruned}, err
+}
+
+// prune calls every Pruner with the retained snapshots. A snapshot without a
+// manifest is unfinished and no state anyone can go back to, so it is skipped.
+func (r *Releaser) prune(ctx context.Context) ([]Pruned, error) {
+	var pruners []PackageType
+	for _, t := range r.Types {
+		if _, ok := t.(Pruner); ok {
+			pruners = append(pruners, t)
+		}
+	}
+	if len(pruners) == 0 {
+		return nil, nil
+	}
+	names, err := r.snapshots(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var retained []*Previous
+	for _, name := range names {
+		p, err := r.previous(ctx, name)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		retained = append(retained, p)
+	}
+	out := make([]Pruned, 0, len(pruners))
+	for _, t := range pruners {
+		res, err := t.(Pruner).Prune(ctx, r.Bucket, retained)
+		if err != nil {
+			return nil, fmt.Errorf("prune %s: %w", t.Name(), err)
+		}
+		res.Type = t.Name()
+		out = append(out, res)
+	}
+	return out, nil
 }
 
 // Rollback undoes the release that holds the lock: the index metadata goes back

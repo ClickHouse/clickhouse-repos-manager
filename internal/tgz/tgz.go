@@ -30,7 +30,8 @@ func (Type) Indexed() bool  { return false }
 // Live finds nothing: TGZ has no metadata.
 func (Type) Live(context.Context, store.Bucket) ([]release.File, error) { return nil, nil }
 
-// Parse takes <package>-<version>-<arch>.tgz and the same name with .tgz.sha512.
+// Parse takes <package>-<version>-<arch>.tgz, <package>-<version>.tgz for
+// architecture all, and the same names with .tgz.sha512.
 func (Type) Parse(name, version string) (pkg, arch string, ok bool, err error) {
 	base, ok := strings.CutSuffix(name, checksum)
 	if !ok {
@@ -38,12 +39,15 @@ func (Type) Parse(name, version string) (pkg, arch string, ok bool, err error) {
 			return "", "", false, nil
 		}
 	}
+	if pkg, ok = strings.CutSuffix(base, "-"+version); ok && pkg != "" {
+		return pkg, "all", true, nil
+	}
 	i := strings.LastIndexByte(base, '-')
 	if i < 0 {
 		return "", "", true, fmt.Errorf("%s: want <package>-%s-<arch>%s", name, version, archive)
 	}
 	if arch = base[i+1:]; arch != "amd64" && arch != "arm64" {
-		return "", "", true, fmt.Errorf("%s: unknown architecture %q, want amd64 or arm64", name, arch)
+		return "", "", true, fmt.Errorf("%s: unknown architecture %q, want amd64 or arm64, or none for all", name, arch)
 	}
 	if pkg, ok = strings.CutSuffix(base[:i], "-"+version); !ok || pkg == "" {
 		return "", "", true, fmt.Errorf("%s: want <package>-%s-<arch>%s, the version of the release", name, version, archive)

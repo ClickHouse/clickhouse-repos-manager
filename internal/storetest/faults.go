@@ -197,6 +197,11 @@ func (f *Faults) DeleteOwned(ctx context.Context, key, release, sha256 string) (
 	return res, err
 }
 
+func (f *Faults) DeleteStamped(ctx context.Context, key string) (res store.DeleteResult, err error) {
+	err = f.mutate("delete stamped", key, func() (e error) { res, e = f.B.DeleteStamped(ctx, key); return })
+	return res, err
+}
+
 // ForEachFault runs scenario once without a fault to count its mutating calls,
 // then as a subtest for every call number and every mode.
 //

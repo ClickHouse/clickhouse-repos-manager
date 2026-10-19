@@ -262,3 +262,5 @@ func (view) Delete(context.Context, string) error { return errView }
 func (view) DeleteOwned(context.Context, string, string, string) (store.DeleteResult, error) {
 	return 0, errView
 }
+
+func (view) DeleteStamped(context.Context, string) (store.DeleteResult, error) { return 0, errView }

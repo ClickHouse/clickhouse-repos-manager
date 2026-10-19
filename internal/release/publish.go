@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -52,6 +54,8 @@ type Plan struct {
 	Assets []Asset
 	// Metadata is the index metadata the release builds, in commit order.
 	Metadata []Metadata
+	// Unreferenced is set only by Remover.Remove.
+	Unreferenced []string
 }
 
 // Previous is the snapshot a release builds on.
@@ -221,8 +225,9 @@ func (r *Releaser) selected(only []string) (map[string]bool, error) {
 	return sel, nil
 }
 
-// fileSet checks that every selected package type has packages, and that all
-// of them have the same (package, architecture) pairs.
+// fileSet checks that every selected package type has packages, that each
+// package comes for exactly amd64 and arm64 or exactly for all, and that all
+// package types have the same (package, architecture) pairs.
 func fileSet(types []PackageType, selected map[string]bool, byType map[string][]Package) error {
 	sets := map[string]map[string]bool{}
 	union := map[string]bool{}
@@ -232,12 +237,23 @@ func fileSet(types []PackageType, selected map[string]bool, byType map[string][]
 			continue
 		}
 		set := map[string]bool{}
+		archs := map[string]map[string]bool{}
 		for _, p := range byType[t.Name()] {
 			set[p.Pkg+" "+p.Arch] = true
 			union[p.Pkg+" "+p.Arch] = true
+			if archs[p.Pkg] == nil {
+				archs[p.Pkg] = map[string]bool{}
+			}
+			archs[p.Pkg][p.Arch] = true
 		}
 		if len(set) == 0 {
 			errs = append(errs, "no "+t.Name()+" packages")
+		}
+		for _, pkg := range slices.Sorted(maps.Keys(archs)) {
+			a := archs[pkg]
+			if !(len(a) == 2 && a["amd64"] && a["arm64"]) && !(len(a) == 1 && a["all"]) {
+				errs = append(errs, fmt.Sprintf("%s %s comes for %s, want amd64 and arm64, or all", t.Name(), pkg, strings.Join(slices.Sorted(maps.Keys(a)), " and ")))
+			}
 		}
 		sets[t.Name()] = set
 	}

@@ -308,7 +308,19 @@ func runPublish(args []string, stdout io.Writer) error {
 }
 
 func runUnlock(args []string, stdout io.Writer) error {
-	return runTagged("unlock", args, stdout, (*release.Releaser).Unlock)
+	return runTagged("unlock", args, stdout, func(r *release.Releaser, ctx context.Context, tag string) (release.Held, error) {
+		u, err := r.Unlock(ctx, tag)
+		if err != nil {
+			return release.Held{}, err
+		}
+		for _, p := range u.Pruned {
+			fmt.Fprintf(stdout, "pruned %s: %d deleted\n", p.Type, len(p.Deleted))
+			for _, key := range p.NotStamped {
+				fmt.Fprintf(stdout, "pruned %s: %s is unreferenced but carries no stamp, kept\n", p.Type, key)
+			}
+		}
+		return u.Held, nil
+	})
 }
 
 func runRollback(args []string, stdout io.Writer) error {

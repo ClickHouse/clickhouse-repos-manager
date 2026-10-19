@@ -21,7 +21,7 @@ type PackageType interface {
 	Prefix() string
 	// Parse claims an input package by its file name: ok when the name is of
 	// this package type, err when it is but does not parse for version (another
-	// version, an unknown architecture). Architectures are amd64 and arm64.
+	// version, an unknown architecture). Architectures are amd64, arm64 and all.
 	Parse(name, version string) (pkg, arch string, ok bool, err error)
 	// Indexed reports whether the package type has index metadata. Without
 	// it (TGZ) adopt finds nothing to adopt, and objects under Prefix are fine.
@@ -37,6 +37,39 @@ type PackageType interface {
 	// hashes one level up). SHA256 is computed from the bytes it verified.
 	// An empty repository has no files.
 	Live(ctx context.Context, b store.Bucket) ([]File, error)
+}
+
+// Pruner is a package type with content named metadata that unlock prunes.
+type Pruner interface {
+	// Prune deletes, with store.DeleteStamped, the content named metadata that
+	// no retained snapshot references.
+	Prune(ctx context.Context, b store.Bucket, retained []*Previous) (Pruned, error)
+}
+
+// Pruned is what a Pruner did.
+type Pruned struct {
+	// Type is the package type name; unlock sets it.
+	Type    string
+	Deleted []string
+	// NotStamped are unreferenced objects without a stamp; they stay.
+	NotStamped []string
+}
+
+// Selector names the packages a remove takes out of one channel.
+type Selector struct {
+	Channel, Version string
+	// Packages, when not empty, narrows the remove to these package names.
+	Packages []string
+	// Arch, when not empty, narrows the remove to amd64, arm64 or all.
+	Arch string
+}
+
+// Remover is a package type with an index that a remove can shrink.
+type Remover interface {
+	// Remove builds the index metadata of previous without the selected
+	// packages. Plan.Unreferenced lists the package keys that no index of any
+	// channel references any more. A selector that matches nothing is an error.
+	Remove(ctx context.Context, previous *Previous, sel Selector) (Plan, error)
 }
 
 // Releaser runs the release protocol on a bucket.

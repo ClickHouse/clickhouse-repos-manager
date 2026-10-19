@@ -133,7 +133,7 @@ func (o PutOptions) object(key string, size int64, etag, sha256 string) Object {
 	}
 }
 
-// DeleteResult is the outcome of DeleteOwned.
+// DeleteResult is the outcome of DeleteOwned and DeleteStamped.
 type DeleteResult int
 
 const (
@@ -143,6 +143,8 @@ const (
 	Absent
 	// NotOwned means the object carries no stamp or another one, and stays.
 	NotOwned
+	// NotStamped means the object carries no stamp at all, and stays.
+	NotStamped
 )
 
 func (r DeleteResult) String() string {
@@ -153,6 +155,8 @@ func (r DeleteResult) String() string {
 		return "absent"
 	case NotOwned:
 		return "not owned"
+	case NotStamped:
+		return "not stamped"
 	}
 	return fmt.Sprintf("DeleteResult(%d)", int(r))
 }
@@ -494,6 +498,29 @@ func (s *Store) DeleteOwned(ctx context.Context, key, release, sha256 string) (D
 	}
 	if obj.SHA256 != sha256 {
 		return 0, fmt.Errorf("delete owned %s: stamp %s, sha256 %s, want %s: %w", key, release, obj.SHA256, sha256, ErrHashMismatch)
+	}
+	if _, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &s.bucket, Key: s.full(key)}); err != nil {
+		return 0, s.wrap("delete", key, err)
+	}
+	return Deleted, nil
+}
+
+// DeleteStamped deletes an object only if it carries the stamp of any release,
+// so it never removes an object this tool did not write. Only the by-hash
+// pruning calls it; like DeleteOwned it is not limited to the deletable prefixes.
+func (s *Store) DeleteStamped(ctx context.Context, key string) (DeleteResult, error) {
+	if key == "" || strings.Contains(key, "..") {
+		return 0, fmt.Errorf("delete stamped %q: refused", key)
+	}
+	obj, err := s.Head(ctx, key)
+	if errors.Is(err, ErrNotFound) {
+		return Absent, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if obj.Release == "" {
+		return NotStamped, nil
 	}
 	if _, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &s.bucket, Key: s.full(key)}); err != nil {
 		return 0, s.wrap("delete", key, err)

@@ -225,3 +225,14 @@ func (m *Mem) DeleteOwned(ctx context.Context, key, release, sha256 string) (sto
 	}
 	return store.Deleted, m.Delete(ctx, key)
 }
+
+func (m *Mem) DeleteStamped(ctx context.Context, key string) (store.DeleteResult, error) {
+	o, err := m.Head(ctx, key)
+	switch {
+	case err != nil:
+		return store.Absent, nil
+	case o.Release == "":
+		return store.NotStamped, nil
+	}
+	return store.Deleted, m.Delete(ctx, key)
+}

@@ -125,10 +125,50 @@ func (f fakeType) Stage(ctx context.Context, prev *Previous, tag Tag, pkgs []Pac
 	return plan, nil
 }
 
-// packageFiles writes one fake amd64 package per package type for the tag's version.
+var _ Pruner = fakeType{}
+
+// Prune deletes the by-hash copies that no retained Packages has.
+func (f fakeType) Prune(ctx context.Context, b store.Bucket, retained []*Previous) (Pruned, error) {
+	referenced := map[string]bool{}
+	for _, prev := range retained {
+		for _, ch := range []string{"lts", "stable"} {
+			body, found, err := prev.Get(ctx, f.Prefix()+"dists/"+ch+"/Packages")
+			if err != nil {
+				return Pruned{}, err
+			}
+			if found {
+				referenced[f.Prefix()+"dists/"+ch+"/by-hash/"+hashes.Bytes(body).SHA256] = true
+			}
+		}
+	}
+	var keys []string
+	err := b.List(ctx, f.Prefix()+"dists/", func(o store.Object) error {
+		if strings.Contains(o.Key, "/by-hash/") && !referenced[o.Key] {
+			keys = append(keys, o.Key)
+		}
+		return nil
+	})
+	if err != nil {
+		return Pruned{}, err
+	}
+	var res Pruned
+	for _, key := range keys {
+		switch r, err := b.DeleteStamped(ctx, key); {
+		case err != nil:
+			return Pruned{}, err
+		case r == store.Deleted:
+			res.Deleted = append(res.Deleted, key)
+		case r == store.NotStamped:
+			res.NotStamped = append(res.NotStamped, key)
+		}
+	}
+	return res, nil
+}
+
+// packageFiles writes one fake package per package type and architecture for the tag's version.
 func packageFiles(t *testing.T, tag string) []string {
 	t.Helper()
-	return packageSet(t, tag, []string{"clickhouse"}, []string{"amd64"})
+	return packageSet(t, tag, []string{"clickhouse"}, []string{"amd64", "arm64"})
 }
 
 // packageSet writes a fake package per package type, package and architecture.

@@ -24,6 +24,10 @@ func TestParse(t *testing.T) {
 	}{
 		{name: "clickhouse-common-static-dbg-26.3.36.6-arm64.tgz", pkg: "clickhouse-common-static-dbg", arch: "arm64", ok: true},
 		{name: "clickhouse-client-26.3.36.6-amd64.tgz.sha512", pkg: "clickhouse-client", arch: "amd64", ok: true},
+		{name: "clickhouse-docs-26.3.36.6.tgz", pkg: "clickhouse-docs", arch: "all", ok: true},
+		{name: "clickhouse-docs-26.3.36.6.tgz.sha512", pkg: "clickhouse-docs", arch: "all", ok: true},
+		{name: "-26.3.36.6.tgz", ok: true, err: `unknown architecture "26.3.36.6"`},
+		{name: "clickhouse-client-26.3.36.6-all.tgz", ok: true, err: `unknown architecture "all"`},
 		{name: "clickhouse-client_26.3.36.6_amd64.deb"},
 		{name: "clickhouse-client-26.3.36.6.x86_64.rpm"},
 		{name: "clickhouse-client-26.3.36.6-amd64.tgz.sha256"},

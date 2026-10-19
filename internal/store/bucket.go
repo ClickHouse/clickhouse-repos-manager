@@ -22,6 +22,7 @@ type Bucket interface {
 	AbortUploads(ctx context.Context, key string) (int, error)
 	Delete(ctx context.Context, key string) error
 	DeleteOwned(ctx context.Context, key, release, sha256 string) (DeleteResult, error)
+	DeleteStamped(ctx context.Context, key string) (DeleteResult, error)
 }
 
 var _ Bucket = (*Store)(nil)

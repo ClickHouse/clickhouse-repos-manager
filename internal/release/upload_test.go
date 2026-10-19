@@ -51,7 +51,7 @@ func TestPublishForeignObject(t *testing.T) {
 	ctx, m := context.Background(), newMem()
 	b := steady(t, m)
 	files := packageFiles(t, reqA.Tag)
-	m.PutForeign("tgz/lts/"+filepath.Base(files[1]), []byte("package "+filepath.Base(files[1])+"\n"))
+	m.PutForeign("tgz/lts/"+filepath.Base(files[2]), []byte("package "+filepath.Base(files[2])+"\n"))
 	before := objects(t, b)
 	r := releaser(b)
 	mustLock(t, r, reqA)
@@ -192,17 +192,17 @@ func TestPublishPublicURL(t *testing.T) {
 	ctx, b := context.Background(), steady(t, newMem())
 	var missing sync.Map
 	r := releaser(b)
-	files := packageSet(t, reqA.Tag, []string{"a b"}, []string{"amd64"})
+	files := packageSet(t, reqA.Tag, []string{"a b"}, []string{"amd64", "arm64"})
 	mustLock(t, r, reqA)
 	p, err := r.Publish(ctx, files, nil)
 	if err != nil || p.PublicChecked != 0 {
 		t.Fatalf("without a public URL: checked %d, %v", p.PublicChecked, err)
 	}
 	r.PublicURL = public(t, b, &missing).URL + "/"
-	if p, err = r.Publish(ctx, files, nil); err != nil || p.PublicChecked != 4 {
-		t.Fatalf("checked %d, want 2 packages in 2 channels: %v", p.PublicChecked, err)
+	if p, err = r.Publish(ctx, files, nil); err != nil || p.PublicChecked != 8 {
+		t.Fatalf("checked %d, want 4 packages in 2 channels: %v", p.PublicChecked, err)
 	}
-	missing.Store("tgz/stable/"+filepath.Base(files[1]), true)
+	missing.Store("tgz/stable/"+filepath.Base(files[2]), true)
 	_, err = r.Publish(ctx, files, nil)
 	wantErr(t, err, "public URL check: "+r.PublicURL+"tgz/stable/a%20b-26.3.36.6-amd64.tgz: status 404")
 }

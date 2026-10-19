@@ -238,3 +238,35 @@ func TestDeleteOwned(t *testing.T) {
 		}
 	}
 }
+
+func TestDeleteStamped(t *testing.T) {
+	s, ctx := storetest.New(t), context.Background()
+	stamped, err := s.PutIfAbsent(ctx, "deb/dists/lts/main/binary-amd64/by-hash/SHA512/a", []byte("a"), store.PutOptions{Release: "v26.2.1.1-stable"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := s.PutIfAbsent(ctx, "deb/dists/lts/main/binary-amd64/by-hash/SHA512/b", []byte("b"), store.PutOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		key  string
+		want store.DeleteResult
+	}{
+		{plain.Key, store.NotStamped},
+		{stamped.Key, store.Deleted},
+		{stamped.Key, store.Absent},
+	} {
+		if got, err := s.DeleteStamped(ctx, tc.key); err != nil || got != tc.want {
+			t.Errorf("DeleteStamped(%s) = %v, %v, want %v", tc.key, got, err, tc.want)
+		}
+	}
+	if _, err := s.Head(ctx, plain.Key); err != nil {
+		t.Errorf("%s: %v, must stay", plain.Key, err)
+	}
+	for _, bad := range []string{"", "a/../b"} {
+		if _, err := s.DeleteStamped(ctx, bad); err == nil {
+			t.Errorf("DeleteStamped(%q) accepted", bad)
+		}
+	}
+}

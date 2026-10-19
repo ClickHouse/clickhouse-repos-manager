@@ -124,8 +124,8 @@ func TestPublish(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Two packages in two channels, and a by-hash file per package type and channel.
-		if len(lines) != 8 {
+		// Four packages in two channels, and a by-hash file per package type and channel.
+		if len(lines) != 12 {
 			t.Fatalf("assets %+v", lines)
 		}
 		for _, line := range lines {
@@ -140,7 +140,7 @@ func TestPublish(t *testing.T) {
 			t.Fatal("a rerun in committed changed the bucket")
 		}
 		tail, total, err := r.AssetsTail(ctx, 3)
-		if err != nil || total != 8 || len(tail) != 3 || !strings.Contains(tail[2], `"key":"`) {
+		if err != nil || total != 12 || len(tail) != 3 || !strings.Contains(tail[2], `"key":"`) {
 			t.Fatalf("tail %q of %d: %v", tail, total, err)
 		}
 
@@ -243,7 +243,7 @@ func TestPublishConflict(t *testing.T) {
 	backends(t, func(t *testing.T, b store.Bucket) {
 		ctx, b := context.Background(), steady(t, b)
 		files := packageFiles(t, reqA.Tag)
-		if _, err := b.Put(ctx, "tgz/lts/"+filepath.Base(files[1]), []byte("other"), store.PutOptions{}); err != nil {
+		if _, err := b.Put(ctx, "tgz/lts/"+filepath.Base(files[2]), []byte("other"), store.PutOptions{}); err != nil {
 			t.Fatal(err)
 		}
 		before := objects(t, b)
@@ -279,10 +279,13 @@ func TestPublishRefused(t *testing.T) {
 		{[]string{"-26.3.36.6-amd64.deb"}, nil, "not version"},
 		{files[:1], nil, "no tgz packages"},
 		{packageSet(t, reqA.Tag, []string{"a", "b"}, []string{"amd64", "arm64"})[1:], nil, "deb lacks a amd64"},
+		{packageSet(t, reqA.Tag, []string{"a"}, []string{"amd64"}), nil, "deb a comes for amd64, want amd64 and arm64, or all"},
+		{packageSet(t, reqA.Tag, []string{"a"}, []string{"amd64"}), []string{"tgz"}, "a deb package, but only tgz"},
+		{packageSet(t, reqA.Tag, []string{"a"}, []string{"amd64"})[1:], []string{"tgz"}, "tgz a comes for amd64, want"},
 		{nil, nil, "no deb packages"},
 		{files, []string{"deb"}, "a tgz package, but only deb are published"},
 		{files, []string{"rpm"}, "package type rpm not in this build"},
-		{files[1:], []string{"deb", "tgz"}, "no deb packages"},
+		{files[2:], []string{"deb", "tgz"}, "no deb packages"},
 	} {
 		_, err = r.Publish(ctx, tc.paths, tc.only)
 		wantErr(t, err, tc.want)
@@ -318,14 +321,14 @@ func TestPublishAfterCommitStarted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	extra := packageSet(t, reqA.Tag, []string{"extra"}, []string{"amd64"})
+	extra := packageSet(t, reqA.Tag, []string{"extra"}, []string{"amd64", "arm64"})
 	_, err = r.Publish(ctx, append(files, extra...), nil)
 	wantErr(t, err, "extra-26.3.36.6-amd64.deb has no line in assets")
 	changed := filepath.Join(t.TempDir(), filepath.Base(files[0]))
 	if err := os.WriteFile(changed, []byte("changed"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err = r.Publish(ctx, []string{changed, files[1]}, nil)
+	_, err = r.Publish(ctx, append([]string{changed}, files[1:]...), nil)
 	wantErr(t, err, "differs from deb/")
 
 	// In committing a live file that is neither previous nor the snapshot stops the run.
@@ -386,8 +389,16 @@ func TestFirstRelease(t *testing.T) {
 }
 
 func TestUnlock(t *testing.T) {
-	ctx, b := context.Background(), steady(t, newMem())
+	ctx, m := context.Background(), newMem()
+	b := steady(t, m)
 	r := releaser(b)
+	// W is pruned below; its stable Packages is the only one that no retained
+	// snapshot has, and X kept its lts Packages.
+	wStable := "deb/dists/stable/by-hash/" + hashes.Bytes([]byte(snapshotBody(t, b, snapW, "deb/dists/stable/Packages"))).SHA256
+	wLTS := "deb/dists/lts/by-hash/" + hashes.Bytes([]byte(snapshotBody(t, b, snapW, "deb/dists/lts/Packages"))).SHA256
+	tgzStable := "tgz/dists/stable/by-hash/" + hashes.Bytes([]byte(snapshotBody(t, b, snapW, "tgz/dists/stable/Packages"))).SHA256
+	foreign := "deb/dists/stable/by-hash/foreign"
+	m.PutForeign(foreign, []byte("foreign"))
 	fakes := seedSnapshots(t, b)
 	_, err := r.Unlock(ctx, reqA.Tag)
 	wantErr(t, err, "the lock is free")
@@ -402,14 +413,23 @@ func TestUnlock(t *testing.T) {
 	_, err = r.Unlock(ctx, reqA.Tag)
 	wantErr(t, err, "live metadata differs from snapshot "+snapA)
 	mustPublish(t, r, files)
-	h, err := r.Unlock(ctx, reqA.Tag)
+	u, err := r.Unlock(ctx, reqA.Tag)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if l := stored(t, b, h); l.State != Free || l.Snapshot != snapA || l.Previous != snapX {
+	if l := stored(t, b, u.Held); l.State != Free || l.Snapshot != snapA || l.Previous != snapX {
 		t.Fatalf("lock %+v", l)
 	}
 	checkPruned(t, b, fakes)
+	want := []Pruned{{Type: "deb", Deleted: []string{wStable}, NotStamped: []string{foreign}}, {Type: "tgz", Deleted: []string{tgzStable}}}
+	if !reflect.DeepEqual(u.Pruned, want) {
+		t.Fatalf("pruned %+v, want %+v", u.Pruned, want)
+	}
+	for key, stays := range map[string]bool{wStable: false, wLTS: true, foreign: true} {
+		if _, err := b.Head(ctx, key); (err == nil) != stays {
+			t.Errorf("%s: %v, stays %v", key, err, stays)
+		}
+	}
 	_, err = r.Rollback(ctx, reqA.Tag)
 	wantErr(t, err, "the lock is free")
 }
@@ -596,4 +616,35 @@ func TestParseAssets(t *testing.T) {
 			t.Errorf("%q: no error", bad)
 		}
 	}
+}
+
+func TestFileSet(t *testing.T) {
+	sel := map[string]bool{"deb": true, "tgz": true}
+	set := func(pairs ...string) map[string][]Package {
+		m := map[string][]Package{}
+		for _, p := range pairs {
+			typ, rest, _ := strings.Cut(p, ":")
+			pkg, arch, _ := strings.Cut(rest, " ")
+			m[typ] = append(m[typ], Package{Pkg: pkg, Arch: arch})
+		}
+		return m
+	}
+	both := []string{"deb:a amd64", "deb:a arm64", "tgz:a amd64", "tgz:a arm64"}
+	all := []string{"deb:d all", "tgz:d all"}
+	for _, ok := range [][]string{both, all, append(append([]string{}, both...), all...)} {
+		if err := fileSet(types, sel, set(ok...)); err != nil {
+			t.Errorf("%q: %v", ok, err)
+		}
+	}
+	for want, bad := range map[string][]string{
+		"deb a comes for amd64,":        {"deb:a amd64", "tgz:a amd64"},
+		"deb a comes for all and amd64": {"deb:a amd64", "deb:a arm64", "deb:a all", "tgz:a amd64", "tgz:a arm64", "tgz:a all"},
+		"tgz lacks d all":               {"deb:d all", "tgz:d amd64", "tgz:d arm64"},
+		"tgz d comes for arm64,":        {"deb:d amd64", "deb:d arm64", "tgz:d arm64"},
+		"no tgz packages":               {"deb:d all"},
+	} {
+		wantErr(t, fileSet(types, sel, set(bad...)), want)
+	}
+	// The rule holds for a single package type too.
+	wantErr(t, fileSet(types, map[string]bool{"tgz": true}, set("tgz:a amd64")), "tgz a comes for amd64,")
 }
