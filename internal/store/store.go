@@ -229,7 +229,7 @@ func New(cfg Config) (*Store, error) {
 		HTTPClient:                 awshttp.NewBuildableClient().WithTimeout(10 * time.Minute),
 		// workerd (the local R2 simulator) never answers Expect: 100-continue.
 		ContinueHeaderThresholdBytes: -1,
-		APIOptions:                   []func(*middleware.Stack) error{unsignedAcceptEncoding},
+		APIOptions:                   []func(*middleware.Stack) error{unsignedAcceptEncoding, noDefaultContentType},
 		Retryer: retry.NewStandard(func(o *retry.StandardOptions) {
 			o.MaxAttempts = 8
 			o.MaxBackoff = 30 * time.Second
@@ -587,6 +587,18 @@ func unsignedAcceptEncoding(stack *middleware.Stack) error {
 			}
 			return next.HandleFinalize(ctx, in)
 		}), "Signing", middleware.After)
+}
+
+// noDefaultContentType drops the application/octet-stream the SDK sends for a
+// payload without Content-Type, so the object has none, as production files have.
+func noDefaultContentType(stack *middleware.Stack) error {
+	return stack.Finalize.Insert(middleware.FinalizeMiddlewareFunc("ChDeployNoDefaultContentType",
+		func(ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (middleware.FinalizeOutput, middleware.Metadata, error) {
+			if r, ok := in.Request.(*smithyhttp.Request); ok && smithyhttp.GetIsContentTypeDefaultValue(ctx) {
+				r.Header.Del("Content-Type")
+			}
+			return next.HandleFinalize(ctx, in)
+		}), "Signing", middleware.Before)
 }
 
 // copySource is the URL-encoded "bucket/key" that CopyObject requires.

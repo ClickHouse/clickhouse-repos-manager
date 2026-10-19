@@ -270,3 +270,25 @@ func TestDeleteStamped(t *testing.T) {
 		}
 	}
 }
+
+// An object written without a Content-Type has none, like the production
+// indexes; the SDK default application/octet-stream is not sent.
+func TestNoDefaultContentType(t *testing.T) {
+	storetest.SkipOnMiniflare(t, "it stores application/octet-stream when no Content-Type was sent")
+	s, ctx := storetest.New(t), context.Background()
+	none, err := s.PutIfAbsent(ctx, "none", []byte("x"), store.PutOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Put(ctx, "gz", []byte("x"), store.PutOptions{ContentType: "application/gzip"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CopyIfSourceMatch(ctx, "none", none.ETag, "copy"); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"none": "", "gz": "application/gzip", "copy": ""} {
+		if obj, err := s.Head(ctx, key); err != nil || obj.ContentType != want {
+			t.Errorf("%s: content type %q, want %q: %v", key, obj.ContentType, want, err)
+		}
+	}
+}
