@@ -169,6 +169,12 @@ func (r *Releaser) create(ctx context.Context, l Lock) (Held, error) {
 		return Held{}, err
 	}
 	if snapshots {
+		// Another run may have created the lock and adopted since our read.
+		if _, found, err := r.read(ctx); err != nil {
+			return Held{}, err
+		} else if found {
+			return Held{}, fmt.Errorf("the lock appeared while this run created it: %w", store.ErrPrecondition)
+		}
 		return Held{}, fmt.Errorf("no lock, but %s holds snapshots: the lock was deleted; restore it by hand", config.SnapshotsPrefix)
 	}
 	return r.write(ctx, l, "")

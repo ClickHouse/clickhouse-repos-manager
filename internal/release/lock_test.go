@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-repos-manager/internal/config"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/hashes"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/store"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/storetest"
@@ -239,4 +240,50 @@ func TestLockRaceSameTag(t *testing.T) {
 		}
 		checkAdopted(t, b, seedDeb)
 	})
+}
+
+// beforeSnapshotList runs fn once, just before the first List of the snapshots.
+type beforeSnapshotList struct {
+	store.Bucket
+	once sync.Once
+	fn   func()
+}
+
+func (b *beforeSnapshotList) List(ctx context.Context, prefix string, fn func(store.Object) error) error {
+	if prefix == config.SnapshotsPrefix {
+		b.once.Do(b.fn)
+	}
+	return b.Bucket.List(ctx, prefix, fn)
+}
+
+// Another run creates the lock and adopts after this run read no lock, but
+// before it listed the snapshots: a lost race, never a deleted lock.
+func TestLockRaceAdoptBeforeList(t *testing.T) {
+	for name, tc := range map[string]struct {
+		other LockRequest
+		want  string
+	}{
+		"same tag":  {other: reqA},
+		"other tag": {other: reqB, want: "lock is held by another release"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := newMem()
+			seed(t, b, seedDeb)
+			racing := &beforeSnapshotList{Bucket: b, fn: func() { mustLock(t, releaser(b), tc.other) }}
+			req := reqA
+			req.RunID = "2"
+			_, err := releaser(racing).Lock(context.Background(), req)
+			if tc.want != "" {
+				wantErr(t, err, tc.want)
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if l := stored(t, b, Held{}); l.Tag != reqA.Tag || len(l.Attempts) != 2 {
+				t.Fatalf("lock %+v", l)
+			}
+			checkAdopted(t, b, seedDeb)
+		})
+	}
 }
