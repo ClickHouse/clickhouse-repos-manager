@@ -149,6 +149,26 @@ func LoadPublic(data []byte) (*Verifier, error) {
 	return &Verifier{keyring: entities}, nil
 }
 
+// LoadPublicFor parses a public key export that must hold exactly one key,
+// whose primary key or a subkey has the fingerprint.
+func LoadPublicFor(data []byte, fingerprint string) (*Verifier, error) {
+	want, err := normalizeFingerprint(fingerprint)
+	if err != nil {
+		return nil, err
+	}
+	entities, err := readKeyRing(data)
+	if err != nil {
+		return nil, fmt.Errorf("read public key: %w", err)
+	}
+	if len(entities) != 1 {
+		return nil, fmt.Errorf("the public key export holds %d keys, want 1", len(entities))
+	}
+	if _, ok := findKeyID(entities[0], want); !ok {
+		return nil, fmt.Errorf("the public key export is %X, which has no key %X", entities[0].PrimaryKey.Fingerprint, want)
+	}
+	return &Verifier{keyring: entities}, nil
+}
+
 // VerifyClearsigned checks a cleartext signed message and returns the signed text.
 func (v *Verifier) VerifyClearsigned(data []byte) ([]byte, error) {
 	block, rest := clearsign.Decode(data)

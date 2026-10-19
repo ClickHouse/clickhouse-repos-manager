@@ -197,6 +197,29 @@ func TestPublicKeyRoundTrip(t *testing.T) {
 	if err := v.VerifyDetached(msg, sig); err != nil {
 		t.Fatal(err)
 	}
+	for _, fpr := range []string{k.signFpr, k.primary, k.encFpr} {
+		v, err := LoadPublicFor(pub, fpr)
+		if err != nil {
+			t.Fatalf("%s: %v", fpr, err)
+		}
+		if err := v.VerifyDetached(msg, sig); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other := newTestKey(t)
+	if _, err := LoadPublicFor(pub, other.signFpr); err == nil {
+		t.Fatal("another fingerprint accepted")
+	}
+	var two bytes.Buffer
+	if err := k.entity.Serialize(&two); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.entity.Serialize(&two); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPublicFor(two.Bytes(), k.signFpr); err == nil {
+		t.Fatal("an export with two keys accepted")
+	}
 }
 
 func TestPassphrase(t *testing.T) {

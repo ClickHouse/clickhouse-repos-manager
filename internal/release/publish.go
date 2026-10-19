@@ -64,6 +64,13 @@ type Previous struct {
 	Manifest Manifest
 	bucket   store.Bucket
 	files    map[string]File
+	live     bool
+}
+
+// LivePrevious reads the live keys of files, as a package type's Live
+// returned them, instead of a snapshot; every read is checked against files.
+func LivePrevious(b store.Bucket, files []File) *Previous {
+	return &Previous{Name: "live", Manifest: Manifest{Schema: Schema, Files: files}, bucket: b, files: byKey(files), live: true}
 }
 
 // Get reads key from the previous snapshot, checked against its manifest.
@@ -73,7 +80,11 @@ func (p *Previous) Get(ctx context.Context, key string) (body []byte, found bool
 	if !ok {
 		return nil, false, nil
 	}
-	body, obj, err := p.bucket.Get(ctx, SnapshotDir(p.Name)+key)
+	full := key
+	if !p.live {
+		full = SnapshotDir(p.Name) + key
+	}
+	body, obj, err := p.bucket.Get(ctx, full)
 	if err != nil {
 		return nil, false, err
 	}
