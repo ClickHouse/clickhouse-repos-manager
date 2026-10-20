@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -31,13 +32,18 @@ func AR(members ...Member) []byte {
 	return b.Bytes()
 }
 
-// TarGz builds a gzip compressed tar of regular files, in the given order.
+// TarGz builds a gzip compressed tar of regular files, and directories for
+// names ending in a slash, in the given order.
 func TarGz(files ...Member) []byte {
 	var b bytes.Buffer
 	zw := gzip.NewWriter(&b)
 	tw := tar.NewWriter(zw)
 	for _, f := range files {
-		if err := tw.WriteHeader(&tar.Header{Name: f.Name, Mode: 0o644, Size: int64(len(f.Body)), Typeflag: tar.TypeReg}); err != nil {
+		h := &tar.Header{Name: f.Name, Mode: 0o644, Size: int64(len(f.Body)), Typeflag: tar.TypeReg}
+		if strings.HasSuffix(f.Name, "/") {
+			h.Mode, h.Typeflag = 0o755, tar.TypeDir
+		}
+		if err := tw.WriteHeader(h); err != nil {
 			panic(err)
 		}
 		if _, err := tw.Write(f.Body); err != nil {
@@ -53,22 +59,35 @@ func TarGz(files ...Member) []byte {
 	return b.Bytes()
 }
 
-// Build returns a .deb with the control text and a data archive holding data.
+// Build returns a .deb with the control text and a data archive holding data
+// in /usr/share/doc/<Package>/payload, so that packages install side by side.
 func Build(control string, data []byte) []byte {
+	pkg := "unnamed"
+	for _, line := range strings.Split(control, "\n") {
+		if name, ok := strings.CutPrefix(line, "Package: "); ok {
+			pkg = name
+		}
+	}
+	doc := "./usr/share/doc/" + pkg + "/"
 	return AR(
 		Member{"debian-binary", []byte("2.0\n")},
 		Member{"control.tar.gz", TarGz(Member{"./control", []byte(control)}, Member{"./md5sums", []byte("")})},
-		Member{"data.tar.gz", TarGz(Member{"./usr/share/doc/payload", data})},
+		Member{"data.tar.gz", TarGz(Member{"./", nil}, Member{"./usr/", nil}, Member{"./usr/share/", nil},
+			Member{"./usr/share/doc/", nil}, Member{doc, nil}, Member{doc + "payload", data})},
 	)
 }
 
 // Control is a control file like the ones nfpm writes for ClickHouse.
-// source, when not empty, adds a Source field.
-func Control(pkg, version, arch, source string) string {
+// source, when not empty, adds a Source field; extra are more "Name: value"
+// lines, before Description.
+func Control(pkg, version, arch, source string, extra ...string) string {
 	c := fmt.Sprintf("Package: %s\nVersion: %s\nSection: database\nPriority: optional\nArchitecture: %s\n"+
 		"Maintainer: ClickHouse Dev Team <packages+linux@clickhouse.com>\nInstalled-Size: 10\n", pkg, version, arch)
 	if source != "" {
 		c += "Source: " + source + "\n"
+	}
+	for _, line := range extra {
+		c += line + "\n"
 	}
 	return c + "Homepage: https://clickhouse.com\nDescription: Test package " + pkg + "\n second line of the description.\n .\n after an empty line.\n"
 }

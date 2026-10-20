@@ -2,7 +2,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 PLATFORMS := linux/amd64 linux/arm64 darwin/arm64
 
-.PHONY: build dist test test-local test-remote vet fmt check-fmt clean
+.PHONY: build dist test test-local test-remote test-reprepro vet fmt check-fmt clean
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/ch-deploy ./cmd/ch-deploy
@@ -27,6 +27,11 @@ test-local:
 # under a random prefix, deleted afterwards.
 test-remote:
 	test/remote.sh $(ARGS)
+
+# The DEB repository against reprepro 5.5.1, read by apt on Ubuntu 14.04 to
+# 26.04 (needs Docker).
+test-reprepro:
+	test/reprepro/run.sh $(ARGS)
 
 vet:
 	go vet ./...

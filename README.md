@@ -84,6 +84,7 @@ does not verify is a problem, and the other checks go on. `lock` and
 make test        # unit tests; bucket and mock key tests skip without their variables
 make test-local  # all tests, bucket tests against a fresh Miniflare container
 make test-remote # all tests, bucket tests against a real bucket
+make test-reprepro # the DEB repository against reprepro 5.5.1 and apt on Ubuntu 14.04 to 26.04
 make dist        # static binaries for linux/amd64, linux/arm64, darwin/arm64 and SHA256SUMS
 ```
 
@@ -124,6 +125,16 @@ before it is sent, after it was applied (the response is lost), or by sending
 it twice as an SDK retry does; `storetest.ForEachFault` runs a scenario once
 per call and mode. `storetest.NewMem()` is an in-memory bucket for fast
 protocol tests and the full fault matrix.
+
+`make test-reprepro` needs Docker. It builds `test/reprepro/`, reprepro
+5.5.1 from source as the release runners have it, and runs `TestReprepro`
+(build tag `reprepro`). The same lts and stable releases of test packages go
+through `ch-deploy` and through reprepro, signed with the same test key. The
+test compares the pool, the index entries as field sets and the `Release`
+files. Then apt in the native `ubuntu:14.04` to `ubuntu:26.04` images updates,
+shows and installs from both repositories, and the results must match. The
+only expected differences are what `ch-deploy` adds: `Acquire-By-Hash` with
+the `by-hash` files, `Packages.xz` and `Public.key`.
 
 A key exported by gpg can be checked with
 `CH_DEPLOY_TEST_SIGNING_KEY_FILE` (base64 secret export) and
