@@ -42,6 +42,7 @@ const (
 	EnvSigningKeyFile = "CH_DEPLOY_SIGNING_KEY_FILE"
 	EnvPassphrase     = "CH_DEPLOY_SIGNING_PASSPHRASE"
 	EnvSignWith       = "CH_DEPLOY_SIGN_WITH"
+	EnvPublicKeyFile  = "CH_DEPLOY_PUBLIC_KEY_FILE"
 	EnvPartSize       = "CH_DEPLOY_PART_SIZE"
 	EnvConcurrency    = "CH_DEPLOY_UPLOAD_CONCURRENCY"
 	EnvAccessKeyID    = "AWS_ACCESS_KEY_ID"
@@ -56,6 +57,8 @@ type Launch struct {
 	PublicURL      string
 	SigningKeyFile string
 	SignWith       string
+	// PublicKeyFile verifies a DEB codename that has no Public.key yet.
+	PublicKeyFile string
 	// PartSize and UploadConcurrency are numbers; empty means the default.
 	PartSize          string
 	UploadConcurrency string
@@ -71,6 +74,7 @@ func (l *Launch) Register(fs *flag.FlagSet) {
 	fs.StringVar(&l.PublicURL, "public-url", "", "public base URL of the bucket (env "+EnvPublicURL+")")
 	fs.StringVar(&l.SigningKeyFile, "signing-key-file", "", "file with the secret key export (env "+EnvSigningKeyFile+", or the key itself in "+EnvSigningKey+")")
 	fs.StringVar(&l.SignWith, "sign-with", "", "fingerprint of the signing key (env "+EnvSignWith+")")
+	fs.StringVar(&l.PublicKeyFile, "public-key-file", "", "public keys that verify a DEB codename without Public.key (env "+EnvPublicKeyFile+")")
 	fs.StringVar(&l.PartSize, "part-size", "", fmt.Sprintf("multipart part size in bytes, at least %d (env %s, default %d)", store.MinPartSize, EnvPartSize, store.DefaultPartSize))
 	fs.StringVar(&l.UploadConcurrency, "upload-concurrency", "", fmt.Sprintf("requests that send data at once (env %s, default %d)", EnvConcurrency, store.DefaultUploadConcurrency))
 }
@@ -91,6 +95,7 @@ func (l *Launch) Resolve() {
 		{&l.PublicURL, EnvPublicURL},
 		{&l.SigningKeyFile, EnvSigningKeyFile},
 		{&l.SignWith, EnvSignWith},
+		{&l.PublicKeyFile, EnvPublicKeyFile},
 		{&l.PartSize, EnvPartSize},
 		{&l.UploadConcurrency, EnvConcurrency},
 	} {
@@ -109,6 +114,11 @@ func (l *Launch) HasStore() bool {
 // HasSigner reports whether a signing key is configured.
 func (l *Launch) HasSigner() bool {
 	return l.SigningKeyFile != "" || l.env(EnvSigningKey) != "" || l.SignWith != ""
+}
+
+// HasSigningKey reports whether the secret key is configured, not only --sign-with.
+func (l *Launch) HasSigningKey() bool {
+	return l.SigningKeyFile != "" || l.env(EnvSigningKey) != ""
 }
 
 // Store connects to the bucket. Deletes are allowed only under the given prefixes.
@@ -200,6 +210,22 @@ func (l *Launch) Signer() (*sign.Signer, error) {
 		return nil, errors.New("signing needs --signing-key-file, " + EnvSigningKeyFile + " or " + EnvSigningKey)
 	}
 	return sign.Load(data, l.SignWith, []byte(l.env(EnvPassphrase)))
+}
+
+// PublicKey loads the keys of --public-key-file; nil without the file.
+func (l *Launch) PublicKey() (*sign.Verifier, error) {
+	if l.PublicKeyFile == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(l.PublicKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("public key: %w", err)
+	}
+	v, err := sign.LoadPublic(data)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", l.PublicKeyFile, err)
+	}
+	return v, nil
 }
 
 func (l *Launch) env(name string) string {

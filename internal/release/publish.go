@@ -151,6 +151,21 @@ func (r *Releaser) Publish(ctx context.Context, paths, only []string) (Published
 	if err != nil {
 		return Published{}, fmt.Errorf("public URL check: %w", err)
 	}
+	if r.PublicURL != "" {
+		m, err := r.manifest(ctx, cur.Lock.Snapshot)
+		if err != nil {
+			return Published{}, err
+		}
+		named, err := r.referenced(ctx)
+		if err != nil {
+			return Published{}, err
+		}
+		k, err := r.CheckPublic(ctx, m.Files, named)
+		if err != nil {
+			return Published{}, fmt.Errorf("public URL check: %w", err)
+		}
+		n += k
+	}
 	return Published{Held: cur, PublicChecked: n}, nil
 }
 
@@ -611,6 +626,73 @@ func (r *Releaser) checkPublic(ctx context.Context, lines []AssetLine) (int, err
 		return 0, err
 	}
 	return len(lines), nil
+}
+
+// referenced collects the content named keys of every Referencer from live.
+func (r *Releaser) referenced(ctx context.Context) ([]File, error) {
+	var out []File
+	for _, t := range r.Types {
+		if ref, ok := t.(Referencer); ok {
+			files, err := ref.Referenced(ctx, r.Bucket)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", t.Name(), err)
+			}
+			out = append(out, files...)
+		}
+	}
+	return out, nil
+}
+
+// CheckPublic reads every file at PublicURL and compares its size and SHA256,
+// and checks the size of every named key by HEAD. It returns the number of
+// keys checked; nothing without PublicURL.
+func (r *Releaser) CheckPublic(ctx context.Context, files, named []File) (int, error) {
+	if r.PublicURL == "" {
+		return 0, nil
+	}
+	client := r.HTTP
+	if client == nil {
+		client = &http.Client{Timeout: time.Minute}
+	}
+	all := append(append([]File(nil), files...), named...)
+	err := r.each(ctx, len(all), func(ctx context.Context, i int) error {
+		f, get := all[i], i < len(files)
+		method := http.MethodHead
+		if get {
+			method = http.MethodGet
+		}
+		u := strings.TrimSuffix(r.PublicURL, "/") + "/" + escapeKey(f.Key)
+		req, err := http.NewRequestWithContext(ctx, method, u, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("%s: status %d", u, resp.StatusCode)
+		}
+		if !get {
+			if resp.ContentLength != f.Size {
+				return fmt.Errorf("%s: size %d, want %d", u, resp.ContentLength, f.Size)
+			}
+			return nil
+		}
+		sums, err := hashes.Sum(resp.Body)
+		if err != nil {
+			return fmt.Errorf("%s: %w", u, err)
+		}
+		if sums.Size != f.Size || sums.SHA256 != f.SHA256 {
+			return fmt.Errorf("%s: size %d sha256 %s, want %d %s", u, sums.Size, sums.SHA256, f.Size, f.SHA256)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return len(all), nil
 }
 
 func escapeKey(key string) string {

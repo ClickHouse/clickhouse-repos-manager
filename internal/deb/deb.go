@@ -31,20 +31,22 @@ const (
 
 // Type is the DEB package type.
 type Type struct {
-	// SignWith is the fingerprint the repository is signed with; Public.key
-	// must hold it.
-	SignWith string
-	// Signer signs Release; without it nothing can be staged, and a codename
-	// without Public.key cannot be verified.
+	// Signer signs Release; without it nothing can be staged.
 	Signer *sign.Signer
+	// PublicKey verifies a codename without Public.key, before Signer.
+	PublicKey *sign.Verifier
 	// Now is the Date of Release; time.Now when nil.
 	Now func() time.Time
+	// Unsigned stages without Signer: Release only, no InRelease, Release.gpg
+	// or Public.key. Only for publish --dry-run.
+	Unsigned bool
 }
 
 var (
 	_ release.PackageType = Type{}
 	_ release.Pruner      = Type{}
 	_ release.Remover     = Type{}
+	_ release.Referencer  = Type{}
 )
 
 func (Type) Name() string   { return "deb" }
@@ -75,7 +77,10 @@ type built struct {
 }
 
 // Check reads every control file and checks it against the file name.
-func (Type) Check(pkgs []release.Package) error {
+func (t Type) Check(pkgs []release.Package) error {
+	if t.Signer == nil && !t.Unsigned {
+		return errors.New("no signing key")
+	}
 	_, err := buildAll(pkgs)
 	return err
 }
@@ -117,7 +122,7 @@ func indexArchs(arch string) []string {
 // Stage uploads the pool files once and rebuilds the indexes of every channel
 // of the tag on top of previous.
 func (t Type) Stage(ctx context.Context, prev *release.Previous, tag release.Tag, pkgs []release.Package) (release.Plan, error) {
-	if t.Signer == nil {
+	if t.Signer == nil && !t.Unsigned {
 		return release.Plan{}, errors.New("no signing key")
 	}
 	all, err := buildAll(pkgs)
@@ -171,11 +176,14 @@ func indexes(ctx context.Context, prev *release.Previous, codename string, must 
 // the by-hash copies of the indexes as assets.
 func (t Type) build(codename string, idx map[string]*Index, plan *release.Plan) error {
 	dir := Dists(codename)
-	pub, err := t.Signer.PublicKey()
-	if err != nil {
-		return err
+	signed := t.Signer != nil
+	if signed {
+		pub, err := t.Signer.PublicKey()
+		if err != nil {
+			return err
+		}
+		plan.Metadata = append(plan.Metadata, release.Metadata{Key: dir + "Public.key", Body: pub})
 	}
-	plan.Metadata = append(plan.Metadata, release.Metadata{Key: dir + "Public.key", Body: pub})
 	var listed []Listed
 	for _, arch := range config.Architectures {
 		packages := idx[arch].Bytes()
@@ -207,6 +215,10 @@ func (t Type) build(codename string, idx map[string]*Index, plan *release.Plan) 
 		}
 	}
 	rel := BuildRelease(codename, t.now(), listed)
+	if !signed {
+		plan.Metadata = append(plan.Metadata, release.Metadata{Key: dir + "Release", Body: rel})
+		return nil
+	}
 	inRelease, err := t.Signer.Clearsign(rel)
 	if err != nil {
 		return err
@@ -220,6 +232,42 @@ func (t Type) build(codename string, idx map[string]*Index, plan *release.Plan) 
 		release.Metadata{Key: dir + "Release.gpg", Body: gpg},
 		release.Metadata{Key: dir + "InRelease", Body: inRelease})
 	return nil
+}
+
+// Referenced returns the by-hash keys that the live Release files name.
+func (t Type) Referenced(ctx context.Context, b store.Bucket) ([]release.File, error) {
+	var out []release.File
+	for _, cn := range config.Codenames {
+		empty, err := emptyPrefix(ctx, b, Dists(cn))
+		if err != nil {
+			return nil, err
+		}
+		if empty {
+			continue
+		}
+		c, err := t.Chain(ctx, b, cn)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", cn, err)
+		}
+		out = append(out, ByHashFiles(cn, c.Release)...)
+	}
+	return out, nil
+}
+
+// ByHashFiles are the by-hash keys a Release names, with the size and SHA256
+// of the index each copies. Only a Release with Acquire-By-Hash names any:
+// reprepro wrote none.
+func ByHashFiles(codename string, r Release) []release.File {
+	if r.Value("Acquire-By-Hash") != "yes" {
+		return nil
+	}
+	var out []release.File
+	for _, p := range r.Paths {
+		if s := r.Files[p]; strings.HasPrefix(path.Base(p), "Packages") && s.SHA512 != "" {
+			out = append(out, release.File{Key: Dists(codename) + ByHash(p, s.SHA512), Size: s.Size, SHA256: s.SHA256})
+		}
+	}
+	return out
 }
 
 // Live verifies every codename that has objects and returns its index metadata.
@@ -261,12 +309,29 @@ type Codename struct {
 	Indexes map[string]*Index
 	// Files are the index metadata files, with SHA256 of the verified bytes.
 	Files []release.File
+	// Signers are the fingerprints of the keys that signed InRelease and Release.gpg.
+	Signers []string
+	// Signature is why the signatures do not verify; nil when they do.
+	Signature error
 }
 
-// Chain verifies a codename: the key, the InRelease and Release.gpg
-// signatures, InRelease equal to Release, and every file Release lists, with
-// a Packages for every architecture.
+// Chain verifies a codename completely, as Read does; a signature that does
+// not verify is an error.
 func (t Type) Chain(ctx context.Context, b store.Bucket, codename string) (*Codename, error) {
+	c, err := t.Read(ctx, b, codename)
+	if err != nil {
+		return nil, err
+	}
+	if c.Signature != nil {
+		return nil, c.Signature
+	}
+	return c, nil
+}
+
+// Read checks a codename: Release, every file it lists by size and hashes, a
+// parseable Packages for every architecture, and, kept in Signature, the
+// InRelease and Release.gpg signatures and InRelease equal to Release.
+func (t Type) Read(ctx context.Context, b store.Bucket, codename string) (*Codename, error) {
 	dir := Dists(codename)
 	c := &Codename{Name: codename, Indexes: map[string]*Index{}}
 	get := func(name string, must bool) ([]byte, bool, error) {
@@ -283,22 +348,7 @@ func (t Type) Chain(ctx context.Context, b store.Bucket, codename string) (*Code
 		c.Files = append(c.Files, release.File{Key: dir + name, Size: obj.Size, ETag: obj.ETag, SHA256: hashes.Bytes(body).SHA256})
 		return body, true, nil
 	}
-	pub, found, err := get("Public.key", false)
-	if err != nil {
-		return nil, err
-	}
-	var v *sign.Verifier
-	switch {
-	case found:
-		if v, err = sign.LoadPublicFor(pub, t.SignWith); err != nil {
-			return nil, fmt.Errorf("Public.key: %w", err)
-		}
-	case t.Signer != nil:
-		v = t.Signer.Verifier()
-	default:
-		return nil, errors.New("no Public.key, and no signing key to verify with")
-	}
-	inRelease, _, err := get("InRelease", true)
+	pub, hasPub, err := get("Public.key", false)
 	if err != nil {
 		return nil, err
 	}
@@ -306,19 +356,29 @@ func (t Type) Chain(ctx context.Context, b store.Bucket, codename string) (*Code
 	if err != nil {
 		return nil, err
 	}
-	gpg, _, err := get("Release.gpg", true)
+	inRelease, hasIn, err := get("InRelease", false)
 	if err != nil {
 		return nil, err
 	}
-	plain, err := v.VerifyClearsigned(inRelease)
+	gpg, hasGpg, err := get("Release.gpg", false)
 	if err != nil {
-		return nil, fmt.Errorf("InRelease: %w", err)
+		return nil, err
 	}
-	if err := v.VerifyDetached(rel, gpg); err != nil {
-		return nil, fmt.Errorf("Release.gpg: %w", err)
+	var v *sign.Verifier
+	switch {
+	case hasPub:
+		if v, err = sign.LoadPublic(pub); err != nil {
+			c.Signature = fmt.Errorf("Public.key: %w", err)
+		}
+	case t.PublicKey != nil:
+		v = t.PublicKey
+	case t.Signer != nil:
+		v = t.Signer.Verifier()
+	default:
+		c.Signature = errors.New("no Public.key, and no public or signing key to verify with")
 	}
-	if !bytes.Equal(bytes.TrimRight(plain, "\n"), bytes.TrimRight(rel, "\n")) {
-		return nil, errors.New("InRelease signs other text than Release")
+	if c.Signature == nil {
+		c.Signature = c.verify(v, rel, inRelease, hasIn, gpg, hasGpg)
 	}
 	if c.Release, err = ParseRelease(rel); err != nil {
 		return nil, fmt.Errorf("Release: %w", err)
@@ -350,13 +410,38 @@ func (t Type) Chain(ctx context.Context, b store.Bucket, codename string) (*Code
 	return c, nil
 }
 
+// verify checks the signatures of Release with v and records who made them.
+func (c *Codename) verify(v *sign.Verifier, rel, inRelease []byte, hasIn bool, gpg []byte, hasGpg bool) error {
+	dir := Dists(c.Name)
+	if !hasIn {
+		return fmt.Errorf("%sInRelease is missing", dir)
+	}
+	if !hasGpg {
+		return fmt.Errorf("%sRelease.gpg is missing", dir)
+	}
+	plain, inSigner, err := v.VerifyClearsigned(inRelease)
+	if err != nil {
+		return fmt.Errorf("InRelease: %w", err)
+	}
+	if !bytes.Equal(bytes.TrimRight(plain, "\n"), bytes.TrimRight(rel, "\n")) {
+		return errors.New("InRelease signs other text than Release")
+	}
+	gpgSigner, err := v.VerifyDetached(rel, gpg)
+	if err != nil {
+		return fmt.Errorf("Release.gpg: %w", err)
+	}
+	c.Signers = []string{inSigner}
+	if gpgSigner != inSigner {
+		c.Signers = append(c.Signers, gpgSigner)
+	}
+	return nil
+}
+
 // ByHashKeys are the by-hash keys of the indexes a Release lists.
 func ByHashKeys(codename string, r Release) []string {
 	var keys []string
-	for _, p := range r.Paths {
-		if s := r.Files[p]; strings.HasPrefix(path.Base(p), "Packages") && s.SHA512 != "" {
-			keys = append(keys, Dists(codename)+ByHash(p, s.SHA512))
-		}
+	for _, f := range ByHashFiles(codename, r) {
+		keys = append(keys, f.Key)
 	}
 	return keys
 }

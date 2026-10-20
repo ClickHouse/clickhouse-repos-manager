@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ClickHouse/clickhouse-repos-manager/internal/sign/signtest"
 )
 
 func parse(t *testing.T, env map[string]string, args ...string) *Launch {
@@ -116,5 +118,32 @@ func TestSignerErrors(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "nope")
 	if _, err := parse(t, map[string]string{EnvSignWith: strings.Repeat("A", 40)}, "--signing-key-file", missing).Signer(); err == nil {
 		t.Fatal("missing key file succeeded")
+	}
+}
+
+func TestPublicKey(t *testing.T) {
+	key, other := signtest.New(t), signtest.Other(t)
+	dir := t.TempDir()
+	file, garbage := filepath.Join(dir, "repomd.xml.key"), filepath.Join(dir, "garbage")
+	// Keys of any number; --sign-with plays no part.
+	if err := os.WriteFile(file, append(append([]byte{}, key.Public...), other.Public...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(garbage, []byte("garbage"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := parse(t, nil).PublicKey(); v != nil || err != nil {
+		t.Fatalf("without the file: %v %v", v, err)
+	}
+	if v, err := parse(t, nil, "--public-key-file", file).PublicKey(); v == nil || err != nil {
+		t.Fatalf("flag: %v %v", v, err)
+	}
+	if v, err := parse(t, map[string]string{EnvSignWith: other.SignWith, EnvPublicKeyFile: file}).PublicKey(); v == nil || err != nil {
+		t.Fatalf("env: %v %v", v, err)
+	}
+	for name, path := range map[string]string{"missing file": file + ".nope", "not a key": garbage} {
+		if _, err := parse(t, map[string]string{EnvPublicKeyFile: path}).PublicKey(); err == nil {
+			t.Errorf("%s: no error", name)
+		}
 	}
 }

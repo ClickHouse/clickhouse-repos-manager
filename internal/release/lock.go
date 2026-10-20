@@ -39,6 +39,14 @@ type PackageType interface {
 	Live(ctx context.Context, b store.Bucket) ([]File, error)
 }
 
+// Referencer is a package type whose index metadata names content named
+// metadata; the public URL check covers those keys too.
+type Referencer interface {
+	// Referenced returns the content named keys the verified live metadata
+	// names, with their size.
+	Referenced(ctx context.Context, b store.Bucket) ([]File, error)
+}
+
 // Pruner is a package type with content named metadata that unlock prunes.
 type Pruner interface {
 	// Prune deletes, with store.DeleteStamped, the content named metadata that

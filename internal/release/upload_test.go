@@ -173,16 +173,26 @@ func TestRollbackAbortsUploads(t *testing.T) {
 	}
 }
 
-// public serves the objects of b by HEAD, as the public bucket URL does; keys in missing are 404.
-func public(t *testing.T, b store.Bucket, missing *sync.Map) *httptest.Server {
+// public serves the objects of b by HEAD and GET, as the public bucket URL
+// does; keys in missing are 404, keys in stale serve the bytes stored there.
+func public(t *testing.T, b store.Bucket, missing *sync.Map, stale ...*sync.Map) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		key := strings.TrimPrefix(req.URL.Path, "/")
-		obj, err := b.Head(req.Context(), key)
-		if _, gone := missing.Load(key); err != nil || gone || req.Method != http.MethodHead {
+		body, obj, err := b.Get(req.Context(), key)
+		if _, gone := missing.Load(key); err != nil || gone || (req.Method != http.MethodHead && req.Method != http.MethodGet) {
 			http.NotFound(w, req)
 			return
 		}
+		for _, s := range stale {
+			if old, ok := s.Load(key); ok {
+				body = old.([]byte)
+			}
+		}
 		w.Header().Set("Content-Length", strconv.FormatInt(obj.Size, 10))
+		if req.Method == http.MethodGet {
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+			_, _ = w.Write(body)
+		}
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -198,10 +208,20 @@ func TestPublishPublicURL(t *testing.T) {
 	if err != nil || p.PublicChecked != 0 {
 		t.Fatalf("without a public URL: checked %d, %v", p.PublicChecked, err)
 	}
-	r.PublicURL = public(t, b, &missing).URL + "/"
-	if p, err = r.Publish(ctx, files, nil); err != nil || p.PublicChecked != 8 {
-		t.Fatalf("checked %d, want 4 packages in 2 channels: %v", p.PublicChecked, err)
+	var stale sync.Map
+	r.PublicURL = public(t, b, &missing, &stale).URL + "/"
+	m, err := r.manifest(ctx, snapA)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if p, err = r.Publish(ctx, files, nil); err != nil || p.PublicChecked != 8+len(m.Files) {
+		t.Fatalf("checked %d, want 4 packages in 2 channels and %d metadata files: %v", p.PublicChecked, len(m.Files), err)
+	}
+	// A public URL that serves old metadata, as a stale cache would.
+	stale.Store(stableRelease, []byte("old"))
+	_, err = r.Publish(ctx, files, nil)
+	wantErr(t, err, "public URL check: "+r.PublicURL+stableRelease+": size 3 sha256")
+	stale.Delete(stableRelease)
 	missing.Store("tgz/stable/"+filepath.Base(files[2]), true)
 	_, err = r.Publish(ctx, files, nil)
 	wantErr(t, err, "public URL check: "+r.PublicURL+"tgz/stable/a%20b-26.3.36.6-amd64.tgz: status 404")

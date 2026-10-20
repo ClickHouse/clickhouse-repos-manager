@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/config"
+	"github.com/ClickHouse/clickhouse-repos-manager/internal/deb"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/release"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/store"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/tgz"
@@ -36,6 +37,7 @@ var commands = map[string]command{
 	"publish":  {"publish the packages of the release that holds the lock, or continue it", runPublish},
 	"unlock":   {"free the lock after the client tests passed; the release is frozen", runUnlock},
 	"rollback": {"undo the release that holds the lock", runRollback},
+	"verify":   {"verify a repository: 'verify deb [--channel <codename>]'", runVerify},
 }
 
 // assetsTail is how many assets lines lock status prints.
@@ -143,13 +145,34 @@ func revision() string {
 }
 
 // packageTypes are the package types this build knows; adopt covers only them.
-func packageTypes() []release.PackageType { return []release.PackageType{tgz.Type{}} }
+// The signing key is loaded when it is configured; a dry run without it
+// builds DEB metadata unsigned. --public-key-file verifies DEB codenames
+// without Public.key.
+func packageTypes(l *config.Launch, dryRun bool) ([]release.PackageType, error) {
+	pub, err := l.PublicKey()
+	if err != nil {
+		return nil, err
+	}
+	d := deb.Type{PublicKey: pub}
+	if l.HasSigningKey() {
+		s, err := l.Signer()
+		if err != nil {
+			return nil, err
+		}
+		d.Signer = s
+	} else {
+		d.Unsigned = dryRun
+	}
+	return []release.PackageType{d, tgz.Type{}}, nil
+}
 
 // testStoreConfig is set only by tests, for buckets the store must treat
 // differently (Miniflare cannot list multipart uploads).
 var testStoreConfig func(*store.Config)
 
-func releaser(l *config.Launch) (*release.Releaser, error) {
+func releaser(l *config.Launch) (*release.Releaser, error) { return newReleaser(l, false) }
+
+func newReleaser(l *config.Launch, dryRun bool) (*release.Releaser, error) {
 	l.Resolve()
 	cfg, err := l.StoreConfig(config.SnapshotsPrefix)
 	if err != nil {
@@ -166,8 +189,12 @@ func releaser(l *config.Launch) (*release.Releaser, error) {
 	if err != nil {
 		return nil, err
 	}
+	types, err := packageTypes(l, dryRun)
+	if err != nil {
+		return nil, err
+	}
 	return &release.Releaser{
-		Bucket: s, Types: packageTypes(), Version: version + revision(),
+		Bucket: s, Types: types, Version: version + revision(),
 		Concurrency: concurrency, PublicURL: l.PublicBase(),
 	}, nil
 }
@@ -262,7 +289,7 @@ func runPublish(args []string, stdout io.Writer) error {
 	var l config.Launch
 	fs := newFlagSet("publish", stdout)
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "Usage: ch-deploy publish [flags] <files...>\n\nFlags come before the files.")
+		fmt.Fprintln(fs.Output(), "Usage: ch-deploy publish [flags] <files...>\n       ch-deploy publish --dry-run --tag <tag> --out <dir> [flags] <files...>\n\nFlags come before the files.")
 		fs.PrintDefaults()
 	}
 	l.Register(fs)
@@ -270,6 +297,9 @@ func runPublish(args []string, stdout io.Writer) error {
 	for _, name := range []string{"deb", "rpm", "tgz"} {
 		only[name] = fs.Bool("only-"+name, false, "publish only "+name+" packages; combinable, narrows the file set check")
 	}
+	dryRun := fs.Bool("dry-run", false, "build locally on top of the live repository, take no lock, write nothing remote, print a diff")
+	tag := fs.String("tag", "", "release tag of a dry run")
+	out := fs.String("out", "", "directory for the files a dry run would write")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return errHelp
@@ -280,18 +310,29 @@ func runPublish(args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout, "no files given")
 		return errUsage
 	}
+	if *dryRun != (*tag != "" && *out != "") || (!*dryRun && (*tag != "" || *out != "")) {
+		fmt.Fprintln(stdout, "--dry-run needs --tag and --out, and only a dry run takes them")
+		return errUsage
+	}
 	var types []string
 	for _, name := range []string{"deb", "rpm", "tgz"} {
 		if *only[name] {
 			types = append(types, name)
 		}
 	}
-	r, err := releaser(&l)
+	r, err := newReleaser(&l, *dryRun)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := signalContext()
 	defer cancel()
+	if *dryRun {
+		planned, err := r.DryRun(ctx, *tag, fs.Args(), types)
+		if err != nil {
+			return err
+		}
+		return printDryRun(stdout, *out, planned, !l.HasSigningKey())
+	}
 	p, err := r.Publish(ctx, fs.Args(), types)
 	if err != nil {
 		return err
@@ -418,7 +459,7 @@ func runCheck(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := s.Verifier().VerifyDetached(probe, sig); err != nil {
+		if _, err := s.Verifier().VerifyDetached(probe, sig); err != nil {
 			return fmt.Errorf("signature does not verify: %w", err)
 		}
 		fmt.Fprintf(stdout, "signing: ok (key %s, primary %s)\n", s.Fingerprint(), s.PrimaryFingerprint())

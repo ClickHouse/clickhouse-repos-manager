@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -140,7 +141,7 @@ type Verifier struct {
 	keyring openpgp.EntityList
 }
 
-// LoadPublic parses an armored or binary public key.
+// LoadPublic parses an armored or binary public key export of any number of keys.
 func LoadPublic(data []byte) (*Verifier, error) {
 	entities, err := readKeyRing(data)
 	if err != nil {
@@ -149,49 +150,57 @@ func LoadPublic(data []byte) (*Verifier, error) {
 	return &Verifier{keyring: entities}, nil
 }
 
-// LoadPublicFor parses a public key export that must hold exactly one key,
-// whose primary key or a subkey has the fingerprint.
-func LoadPublicFor(data []byte, fingerprint string) (*Verifier, error) {
-	want, err := normalizeFingerprint(fingerprint)
-	if err != nil {
-		return nil, err
-	}
-	entities, err := readKeyRing(data)
-	if err != nil {
-		return nil, fmt.Errorf("read public key: %w", err)
-	}
-	if len(entities) != 1 {
-		return nil, fmt.Errorf("the public key export holds %d keys, want 1", len(entities))
-	}
-	if _, ok := findKeyID(entities[0], want); !ok {
-		return nil, fmt.Errorf("the public key export is %X, which has no key %X", entities[0].PrimaryKey.Fingerprint, want)
-	}
-	return &Verifier{keyring: entities}, nil
-}
-
-// VerifyClearsigned checks a cleartext signed message and returns the signed text.
-func (v *Verifier) VerifyClearsigned(data []byte) ([]byte, error) {
+// VerifyClearsigned checks a cleartext signed message and returns the signed
+// text and the fingerprint of the key that signed it.
+func (v *Verifier) VerifyClearsigned(data []byte) (plain []byte, signer string, err error) {
 	block, rest := clearsign.Decode(data)
 	if block == nil {
-		return nil, errors.New("no cleartext signed message found")
+		return nil, "", errors.New("no cleartext signed message found")
 	}
 	if len(bytes.TrimSpace(rest)) != 0 {
-		return nil, errors.New("unexpected data after the signed message")
+		return nil, "", errors.New("unexpected data after the signed message")
 	}
-	if _, err := block.VerifySignature(v.keyring, &packet.Config{}); err != nil {
-		return nil, err
+	sig, e, err := openpgp.VerifyDetachedSignature(v.keyring, bytes.NewReader(block.Bytes), block.ArmoredSignature.Body, &packet.Config{})
+	if err != nil {
+		return nil, "", err
 	}
-	return block.Plaintext, nil
+	return block.Plaintext, signerOf(sig, e), nil
 }
 
-// VerifyDetached checks an armored or binary detached signature of msg.
-func (v *Verifier) VerifyDetached(msg, sig []byte) error {
-	check := openpgp.CheckDetachedSignature
+// VerifyDetached checks an armored or binary detached signature of msg and
+// returns the fingerprint of the key that made it.
+func (v *Verifier) VerifyDetached(msg, sig []byte) (signer string, err error) {
+	var body io.Reader = bytes.NewReader(sig)
 	if bytes.HasPrefix(bytes.TrimSpace(sig), []byte("-----BEGIN PGP")) {
-		check = openpgp.CheckArmoredDetachedSignature
+		block, err := armor.Decode(bytes.NewReader(bytes.TrimSpace(sig)))
+		if err != nil {
+			return "", err
+		}
+		if block.Type != openpgp.SignatureType {
+			return "", fmt.Errorf("armored %s, want %s", block.Type, openpgp.SignatureType)
+		}
+		body = block.Body
 	}
-	_, err := check(v.keyring, bytes.NewReader(msg), bytes.NewReader(sig), &packet.Config{})
-	return err
+	s, e, err := openpgp.VerifyDetachedSignature(v.keyring, bytes.NewReader(msg), body, &packet.Config{})
+	if err != nil {
+		return "", err
+	}
+	return signerOf(s, e), nil
+}
+
+// signerOf is the fingerprint of the key of e that made sig.
+func signerOf(sig *packet.Signature, e *openpgp.Entity) string {
+	if sig.IssuerFingerprint != nil {
+		return fmt.Sprintf("%X", sig.IssuerFingerprint)
+	}
+	if sig.IssuerKeyId != nil {
+		for _, sub := range e.Subkeys {
+			if sub.PublicKey.KeyId == *sig.IssuerKeyId {
+				return fmt.Sprintf("%X", sub.PublicKey.Fingerprint)
+			}
+		}
+	}
+	return fmt.Sprintf("%X", e.PrimaryKey.Fingerprint)
 }
 
 // withNewline terminates the armor end line: gpgv reads past an unterminated one and fails.

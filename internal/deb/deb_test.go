@@ -19,6 +19,7 @@ import (
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/deb/debtest"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/hashes"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/release"
+	"github.com/ClickHouse/clickhouse-repos-manager/internal/sign"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/sign/signtest"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/store"
 	"github.com/ClickHouse/clickhouse-repos-manager/internal/storetest"
@@ -34,7 +35,7 @@ var (
 
 func debType(t testing.TB) Type {
 	k := signtest.New(t)
-	return Type{SignWith: k.SignWith, Signer: k.Signer, Now: func() time.Time { return clock }}
+	return Type{Signer: k.Signer, Now: func() time.Time { return clock }}
 }
 
 func releaser(t testing.TB, b store.Bucket) *release.Releaser {
@@ -393,7 +394,7 @@ func TestLiveProduction(t *testing.T) {
 		}
 		m.PutForeign(Dists(cn)+"Public.key", pub)
 	}
-	typ := Type{SignWith: "885E2BDCF96B0B45ABF058453E4AD4719DDE9A38"}
+	var typ Type
 	files, err := typ.Live(ctx, m)
 	if err != nil {
 		t.Fatal(err)
@@ -401,9 +402,14 @@ func TestLiveProduction(t *testing.T) {
 	if len(files) < 2*10 {
 		t.Fatalf("%d files", len(files))
 	}
-	typ.SignWith = signtest.New(t).SignWith
+	// Every production signature comes from the sign subkey.
+	c, err := typ.Chain(ctx, m, "lts")
+	if err != nil || !reflect.DeepEqual(c.Signers, []string{"885E2BDCF96B0B45ABF058453E4AD4719DDE9A38"}) {
+		t.Fatalf("signers %v: %v", c.Signers, err)
+	}
+	m.PutForeign(Dists("lts")+"Public.key", signtest.New(t).Public)
 	_, err = typ.Live(ctx, m)
-	wantErr(t, err, "Public.key")
+	wantErr(t, err, "InRelease")
 }
 
 func TestLiveRejects(t *testing.T) {
@@ -423,6 +429,13 @@ func TestLiveRejects(t *testing.T) {
 		}, want: "Release.gpg"},
 		"Release changed": {edit: func(t *testing.T, m *storetest.Mem) {
 			m.PutForeign("deb/dists/stable/Release", append(get(t, m, "deb/dists/stable/Release"), "X: y\n"...))
+		}, want: "InRelease signs other text than Release"},
+		"Release.gpg of other text": {edit: func(t *testing.T, m *storetest.Mem) {
+			sig, err := signtest.New(t).Signer.DetachSign([]byte("other"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.PutForeign("deb/dists/stable/Release.gpg", sig)
 		}, want: "Release.gpg"},
 		"InRelease of other text": {edit: func(t *testing.T, m *storetest.Mem) {
 			signed, err := signtest.New(t).Signer.Clearsign(append(get(t, m, "deb/dists/stable/Release"), "X: y\n"...))
@@ -431,10 +444,15 @@ func TestLiveRejects(t *testing.T) {
 			}
 			m.PutForeign("deb/dists/stable/InRelease", signed)
 		}, want: "InRelease signs other text than Release"},
-		"wrong fingerprint": {typ: func(typ Type) Type { typ.SignWith = other.SignWith; return typ }, want: "Public.key"},
 		"Public.key of another key": {edit: func(t *testing.T, m *storetest.Mem) {
 			m.PutForeign("deb/dists/stable/Public.key", other.Public)
+		}, want: "InRelease"},
+		"Public.key not a key": {edit: func(t *testing.T, m *storetest.Mem) {
+			m.PutForeign("deb/dists/stable/Public.key", []byte("garbage"))
 		}, want: "Public.key"},
+		"InRelease missing": {edit: func(t *testing.T, m *storetest.Mem) {
+			_ = m.Delete(context.Background(), "deb/dists/stable/InRelease")
+		}, want: "deb/dists/stable/InRelease is missing"},
 		"no key at all": {edit: func(t *testing.T, m *storetest.Mem) {
 			_ = m.Delete(context.Background(), "deb/dists/stable/Public.key")
 		}, typ: func(typ Type) Type { typ.Signer = nil; return typ }, want: "no Public.key"},
@@ -446,7 +464,7 @@ func TestLiveRejects(t *testing.T) {
 		}, want: "main/binary-amd64/Release is missing"},
 		"partial codename": {edit: func(t *testing.T, m *storetest.Mem) {
 			m.PutForeign("deb/dists/lts/Public.key", get(t, m, "deb/dists/stable/Public.key"))
-		}, want: "lts: deb/dists/lts/InRelease is missing"},
+		}, want: "lts: deb/dists/lts/Release is missing"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := storetest.NewMem()
@@ -585,9 +603,10 @@ func TestCheck(t *testing.T) {
 		return release.Package{Name: name, Pkg: pkg, Arch: arch, Path: p}
 	}
 	ok := write("a1_1.2.3.4_amd64.deb", debtest.Control("a1", "1.2.3.4", "amd64", "src"))
-	if err := (Type{}).Check([]release.Package{ok}); err != nil {
+	if err := (Type{Unsigned: true}).Check([]release.Package{ok}); err != nil {
 		t.Fatal(err)
 	}
+	wantErr(t, (Type{}).Check([]release.Package{ok}), "no signing key")
 	for name, control := range map[string]string{
 		"other package": debtest.Control("a2", "1.2.3.4", "amd64", ""),
 		"other version": debtest.Control("a1", "1.2.3.5", "amd64", ""),
@@ -596,9 +615,199 @@ func TestCheck(t *testing.T) {
 		"index field":   debtest.Control("a1", "1.2.3.4", "amd64", "") + "SHA256: x\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := (Type{}).Check([]release.Package{write("a1_1.2.3.4_amd64.deb", control)}); err == nil {
-				t.Fatal("accepted")
+			err := (Type{Unsigned: true}).Check([]release.Package{write("a1_1.2.3.4_amd64.deb", control)})
+			if err == nil || strings.Contains(err.Error(), "no signing key") {
+				t.Fatalf("error %v", err)
 			}
 		})
 	}
+}
+
+func TestVerify(t *testing.T) {
+	other := signtest.Other(t)
+	client := "deb/pool/main/c/clickhouse/clickhouse-client_26.8.2.1_amd64.deb"
+	for name, tc := range map[string]struct {
+		edit    func(t *testing.T, m *storetest.Mem)
+		typ     func(Type) Type
+		channel string
+		want    string
+	}{
+		"clean":        {},
+		"clean stable": {channel: "stable"},
+		"missing pool file": {edit: func(t *testing.T, m *storetest.Mem) {
+			_ = m.Delete(context.Background(), client)
+		}, want: client + " is missing"},
+		"wrong size": {edit: func(t *testing.T, m *storetest.Mem) {
+			m.PutForeign(client, []byte("short"))
+		}, want: client + ": size 5"},
+		"wrong MD5": {edit: func(t *testing.T, m *storetest.Mem) {
+			body := get(t, m, client)
+			m.PutForeign(client, bytes.Repeat([]byte("x"), len(body)))
+		}, want: client + ": MD5"},
+		"unreferenced": {edit: func(t *testing.T, m *storetest.Mem) {
+			m.PutForeign("deb/pool/main/x/x/x_1_amd64.deb", []byte("x"))
+			m.PutForeign("deb/pool/main/x/", nil)
+		}, want: "x_1_amd64.deb: no index references it"},
+		"not a deb": {edit: func(t *testing.T, m *storetest.Mem) {
+			m.PutForeign("deb/pool/main/x/readme", []byte("x"))
+		}, want: "readme: not a .deb"},
+		"bad signature": {edit: func(t *testing.T, m *storetest.Mem) {
+			sig, _ := other.Signer.DetachSign(get(t, m, "deb/dists/stable/Release"))
+			m.PutForeign("deb/dists/stable/Release.gpg", sig)
+		}, want: "stable: signature: Release.gpg"},
+		"wrong key": {edit: func(t *testing.T, m *storetest.Mem) {
+			m.PutForeign("deb/dists/stable/Public.key", other.Public)
+		}, want: "stable: signature: InRelease"},
+		"no key": {edit: func(t *testing.T, m *storetest.Mem) {
+			_ = m.Delete(context.Background(), "deb/dists/lts/Public.key")
+		}, typ: func(typ Type) Type { typ.Signer = nil; return typ }, want: "lts: signature: no Public.key"},
+		"bad signature and a hanging deb": {edit: func(t *testing.T, m *storetest.Mem) {
+			m.PutForeign("deb/dists/stable/Public.key", other.Public)
+			m.PutForeign("deb/pool/main/x/x/x_1_amd64.deb", []byte("x"))
+		}, want: "x_1_amd64.deb: no index references it"},
+		"no Release": {edit: func(t *testing.T, m *storetest.Mem) {
+			_ = m.Delete(context.Background(), "deb/dists/lts/Release")
+		}, want: "unreferenced pool files not checked"},
+		"unknown channel": {channel: "testing", want: `unknown channel "testing"`},
+		"missing by-hash": {edit: func(t *testing.T, m *storetest.Mem) {
+			c, err := debType(t).Chain(context.Background(), m, "lts")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = m.Delete(context.Background(), ByHashKeys("lts", c.Release)[0])
+		}, want: "by-hash/SHA512/"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := storetest.NewMem()
+			publish(t, m, reqA)
+			unlock(t, m, reqA)
+			publish(t, m, reqB)
+			typ := debType(t)
+			if tc.edit != nil {
+				tc.edit(t, m)
+			}
+			if tc.typ != nil {
+				typ = tc.typ(typ)
+			}
+			rep, err := typ.Verify(context.Background(), m, tc.channel)
+			if tc.want == "" {
+				if err != nil || len(rep.Problems) > 0 {
+					t.Fatalf("%+v %v", rep.Problems, err)
+				}
+				// lts holds A, 3 stanzas per architecture; stable holds A and B.
+				codenames, stanzas := 2, 18
+				if tc.channel != "" {
+					codenames, stanzas = 1, 12
+				}
+				// 4 shared files and 4 per architecture; 5 pool files per release.
+				if rep.Codenames != codenames || rep.Stanzas != stanzas || rep.PoolFiles != 10 || rep.ByHash != 6*codenames || len(rep.Files) != 12*codenames {
+					t.Fatalf("%+v", rep)
+				}
+				signer := signtest.New(t).SignWith
+				if len(rep.Signers) != codenames || !reflect.DeepEqual(rep.Signers[0].Keys, []string{signer}) {
+					t.Fatalf("signers %+v, want %s", rep.Signers, signer)
+				}
+				return
+			}
+			if err != nil {
+				if !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("error %v, want %q", err, tc.want)
+				}
+				return
+			}
+			all := strings.Join(rep.Problems, "\n")
+			if !strings.Contains(all, tc.want) {
+				t.Fatalf("problems %q, want %q", rep.Problems, tc.want)
+			}
+			if !strings.Contains(tc.want, "no index references it") && strings.Contains(all, "no index references it") {
+				t.Fatalf("a false unreferenced report: %q", rep.Problems)
+			}
+			// Only an unreadable codename hides the unreferenced check.
+			if name != "no Release" && strings.Contains(all, "unreferenced pool files not checked") {
+				t.Fatalf("the unreferenced check was skipped: %q", rep.Problems)
+			}
+		})
+	}
+}
+
+// TestDryRun builds a release on top of live and writes nothing.
+func TestDryRun(t *testing.T) {
+	ctx, m := context.Background(), storetest.NewMem()
+	publish(t, m, reqA)
+	unlock(t, m, reqA)
+	before := objects(t, m)
+	files := releaseFiles(t, reqB.Tag)
+	for name, typ := range map[string]Type{"signed": debType(t), "unsigned": {PublicKey: signtest.New(t).Signer.Verifier(), Unsigned: true, Now: func() time.Time { return clock }}} {
+		t.Run(name, func(t *testing.T) {
+			guard := &storetest.Faults{B: m, N: 1, Mode: storetest.Before}
+			r := &release.Releaser{Bucket: guard, Types: []release.PackageType{typ, tgz.Type{}}, Version: "test"}
+			planned, err := r.DryRun(ctx, reqB.Tag, files, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if guard.Calls() != 0 {
+				t.Fatalf("%d mutating calls", guard.Calls())
+			}
+			if len(planned) != 2 || planned[0].Type != "deb" {
+				t.Fatalf("%+v", planned)
+			}
+			built := map[string][]byte{}
+			for _, md := range planned[0].Plan.Metadata {
+				built[md.Key] = md.Body
+			}
+			key := "deb/dists/stable/main/binary-amd64/Packages"
+			if old := planned[0].Old[key]; len(old) == 0 || !bytes.HasPrefix(built[key], old) || len(built[key]) == len(old) {
+				t.Fatalf("%s: old %d bytes, new %d", key, len(old), len(built[key]))
+			}
+			_, signed := built["deb/dists/stable/InRelease"]
+			_, pub := built["deb/dists/stable/Public.key"]
+			if signed != (name == "signed") || pub != signed || built["deb/dists/stable/Release"] == nil {
+				t.Fatalf("InRelease %v, Public.key %v", signed, pub)
+			}
+			if _, ok := built["deb/dists/lts/Release"]; ok {
+				t.Fatal("a -stable release builds lts")
+			}
+		})
+	}
+	if !reflect.DeepEqual(objects(t, m), before) {
+		t.Fatal("the dry run changed the bucket")
+	}
+	// Without a signing key and not unsigned nothing is staged.
+	r := &release.Releaser{Bucket: m, Types: []release.PackageType{Type{}, tgz.Type{}}, Version: "test"}
+	_, err := r.DryRun(ctx, reqB.Tag, files, nil)
+	wantErr(t, err, "no signing key")
+}
+
+// PublicKey verifies a codename without Public.key, and never overrides one.
+func TestPublicKey(t *testing.T) {
+	ctx, m := context.Background(), storetest.NewMem()
+	publish(t, m, reqA)
+	key, other := signtest.New(t), signtest.Other(t)
+	ours, err := sign.LoadPublic(key.Public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := sign.LoadPublic(other.Public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Public.key in the bucket wins over a PublicKey that would not verify.
+	if _, err := (Type{PublicKey: theirs}).Live(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	for _, cn := range config.Codenames {
+		_ = m.Delete(ctx, Dists(cn)+"Public.key")
+	}
+	if _, err := (Type{PublicKey: ours}).Live(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := (Type{PublicKey: ours}).Verify(ctx, m, "")
+	if err != nil || len(rep.Problems) > 0 || rep.Codenames != 2 {
+		t.Fatalf("%+v %v", rep, err)
+	}
+	// PublicKey comes before the signing key.
+	_, err = (Type{PublicKey: theirs, Signer: key.Signer}).Live(ctx, m)
+	wantErr(t, err, "InRelease")
+	_, err = (Type{}).Live(ctx, m)
+	wantErr(t, err, "no Public.key, and no public or signing key to verify with")
 }

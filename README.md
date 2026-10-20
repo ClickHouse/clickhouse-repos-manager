@@ -23,11 +23,24 @@ Work in progress. Available commands:
   file name must carry that version, and the package types must have the same
   packages and architectures; `--only-*` narrows that check to the named
   types. Flags come before the files. With `--public-url` it also checks the
-  packages at the public URL. This build knows TGZ only.
+  packages, the index metadata and the DEB `by-hash` files at the public URL.
+  This build knows DEB and TGZ. Each package comes for `amd64` and `arm64`, or
+  for `all`.
+* `ch-deploy publish --dry-run --tag <tag> --out <dir> [--only-*] <files...>`:
+  builds the release on top of the live repository without a lock and without
+  any write to the bucket, so the read only token is enough. It writes the
+  metadata into `<dir>` at the live keys and prints the added packages and a
+  diff. Without a signing key the DEB `Release` is built unsigned.
+* `ch-deploy verify deb [--channel <codename>]`: verifies the signed chain of
+  every codename, the `by-hash` files, and every pool file by size and, for
+  single part objects, by MD5; without `--channel` every `.deb` in the pool
+  must be referenced. With `--public-url` it also checks the metadata there.
+  Any problem gives exit code 1.
 * `ch-deploy lock status`: prints the lock and its ETag, and the last lines of
   the assets list of the release that holds it.
 * `ch-deploy unlock --tag <tag>`: after the client tests passed, prunes old
-  snapshots, freezes the tag and frees the lock.
+  snapshots and the DEB `by-hash` files only they named, freezes the tag and
+  frees the lock.
 * `ch-deploy rollback --tag <tag>`: undoes the release that holds the lock:
   the metadata goes back to the previous snapshot, and every object the
   release created is deleted.
@@ -50,11 +63,20 @@ the environment or from a file, never from a flag value.
 | | `CH_DEPLOY_SIGNING_KEY` | the secret key export itself |
 | | `CH_DEPLOY_SIGNING_PASSPHRASE` | passphrase, if the key has one |
 | `--sign-with` | `CH_DEPLOY_SIGN_WITH` | full fingerprint of the signing (sub)key |
+| `--public-key-file` | `CH_DEPLOY_PUBLIC_KEY_FILE` | public keys that verify a DEB codename without `Public.key` |
 | `--part-size` | `CH_DEPLOY_PART_SIZE` | multipart part size in bytes, default 64 MiB, at least 5 MiB |
 | `--upload-concurrency` | `CH_DEPLOY_UPLOAD_CONCURRENCY` | requests that send data at once, and parallel checks, default 4 |
 
 The key named by `--sign-with` signs exactly; there is no fallback to another
-subkey or to the primary key.
+subkey or to the primary key. `--sign-with` only selects the key that signs;
+it plays no part in verification. DEB metadata is verified with the keys in
+`dists/<codename>/Public.key`. Where a codename has no `Public.key` yet
+(production before the first release with this tool), `--public-key-file`
+verifies it, for example with `rpm/lts/repodata/repomd.xml.key`; otherwise
+the public part of the signing key does. A `Public.key` in the bucket always
+wins. `verify` prints the key that signed each codename; a signature that
+does not verify is a problem, and the other checks go on. `lock` and
+`publish` stop on it.
 
 ## Development
 

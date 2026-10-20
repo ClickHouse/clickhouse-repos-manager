@@ -157,17 +157,17 @@ func TestSignaturesComeFromTheNamedKey(t *testing.T) {
 	assertSignature(t, cs[sigStart:], s.key.PublicKey.KeyId)
 
 	v := s.Verifier()
-	if err := v.VerifyDetached(msg, det); err != nil {
-		t.Fatalf("detached: %v", err)
+	if signer, err := v.VerifyDetached(msg, det); err != nil || signer != k.signFpr {
+		t.Fatalf("detached: signer %s, want %s: %v", signer, k.signFpr, err)
 	}
-	plain, err := v.VerifyClearsigned(cs)
-	if err != nil {
-		t.Fatalf("clearsigned: %v", err)
+	plain, signer, err := v.VerifyClearsigned(cs)
+	if err != nil || signer != k.signFpr {
+		t.Fatalf("clearsigned: signer %s, want %s: %v", signer, k.signFpr, err)
 	}
 	if !bytes.Equal(bytes.TrimSuffix(plain, []byte("\n")), bytes.TrimSuffix(msg, []byte("\n"))) {
 		t.Fatalf("clearsigned plaintext %q, want %q", plain, msg)
 	}
-	if err := v.VerifyDetached(append(msg, 'x'), det); err == nil {
+	if _, err := v.VerifyDetached(append(msg, 'x'), det); err == nil {
 		t.Fatal("tampered message verified")
 	}
 }
@@ -194,21 +194,22 @@ func TestPublicKeyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := v.VerifyDetached(msg, sig); err != nil {
+	if signer, err := v.VerifyDetached(msg, sig); err != nil || signer != k.signFpr {
+		t.Fatalf("signer %s, want %s: %v", signer, k.signFpr, err)
+	}
+
+	// An export of two keys verifies the signatures of both and names the signer.
+	other := newTestKey(t)
+	otherSigner, err := Load(other.secret, other.signFpr, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, fpr := range []string{k.signFpr, k.primary, k.encFpr} {
-		v, err := LoadPublicFor(pub, fpr)
-		if err != nil {
-			t.Fatalf("%s: %v", fpr, err)
-		}
-		if err := v.VerifyDetached(msg, sig); err != nil {
-			t.Fatal(err)
-		}
+	otherSig, err := otherSigner.DetachSign(msg)
+	if err != nil {
+		t.Fatal(err)
 	}
-	other := newTestKey(t)
-	if _, err := LoadPublicFor(pub, other.signFpr); err == nil {
-		t.Fatal("another fingerprint accepted")
+	if _, err := v.VerifyDetached(msg, otherSig); err == nil {
+		t.Fatal("a key outside the export verified")
 	}
 	var two bytes.Buffer
 	if err := k.entity.Serialize(&two); err != nil {
@@ -217,8 +218,14 @@ func TestPublicKeyRoundTrip(t *testing.T) {
 	if err := other.entity.Serialize(&two); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadPublicFor(two.Bytes(), k.signFpr); err == nil {
-		t.Fatal("an export with two keys accepted")
+	both, err := LoadPublic(two.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for want, s := range map[string][]byte{k.signFpr: sig, other.signFpr: otherSig} {
+		if signer, err := both.VerifyDetached(msg, s); err != nil || signer != want {
+			t.Fatalf("signer %s, want %s: %v", signer, want, err)
+		}
 	}
 }
 

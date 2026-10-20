@@ -22,17 +22,17 @@ type field struct{ name, value string }
 // continuation lines starting with a space or tab, ending in one newline.
 func ParseParagraph(b []byte) (Paragraph, error) {
 	if len(b) == 0 || b[len(b)-1] != '\n' {
-		return Paragraph{}, errors.New("stanza does not end with a newline")
+		return Paragraph{}, errors.New("no newline at the end")
 	}
 	p := Paragraph{raw: b}
 	seen := map[string]bool{}
 	for _, line := range strings.Split(string(b[:len(b)-1]), "\n") {
 		switch {
 		case strings.TrimSpace(line) == "":
-			return Paragraph{}, errors.New("blank line inside a stanza")
+			return Paragraph{}, errors.New("unexpected blank line")
 		case line[0] == ' ' || line[0] == '\t':
 			if len(p.fields) == 0 {
-				return Paragraph{}, errors.New("stanza starts with a continuation line")
+				return Paragraph{}, errors.New("a continuation line before the first field")
 			}
 			f := &p.fields[len(p.fields)-1]
 			f.value += "\n" + line
@@ -143,7 +143,7 @@ func ParseIndex(b []byte) (*Index, error) {
 		}
 		p, err := ParseParagraph(raw)
 		if err != nil {
-			return nil, fmt.Errorf("stanza %d: %w", len(x.items)+1, err)
+			return nil, fmt.Errorf("entry %d: %w", len(x.items)+1, err)
 		}
 		j := end
 		for j < len(b) && b[j] == '\n' {
@@ -161,7 +161,7 @@ func ParseIndex(b []byte) (*Index, error) {
 	for _, it := range x.items {
 		k := KeyOf(it.p)
 		if k.Package == "" || k.Version == "" || k.Architecture == "" {
-			return nil, fmt.Errorf("stanza %s lacks Package, Version or Architecture", k)
+			return nil, fmt.Errorf("entry %s lacks Package, Version or Architecture", k)
 		}
 		if keys[k] {
 			return nil, fmt.Errorf("%s is in the index twice", k)
